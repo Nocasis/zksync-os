@@ -77,6 +77,7 @@ pub struct TxProcessingResult<'a> {
     pub computational_native_used: u64,
     pub native_used: u64,
     pub pubdata_used: u64,
+    pub blob_gas_used: u64,
 }
 
 pub trait BasicTransactionFlow<S: EthereumLikeTypes>

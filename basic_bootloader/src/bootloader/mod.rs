@@ -142,6 +142,7 @@ where
         let mut block_gas_used = 0;
         let mut block_computational_native_used = 0;
         let mut block_pubdata_used = 0;
+        let mut block_blob_gas_used = 0;
 
         // now we can run every transaction
         while let Some(r) = Self::try_begin_next_tx(&mut system) {
@@ -226,6 +227,8 @@ where
                             let next_block_pubdata_used =
                                 block_pubdata_used + tx_processing_result.pubdata_used;
                             let block_logs_used = system.io.logs_len();
+                            let next_block_blob_gas_used =
+                                block_blob_gas_used + tx_processing_result.blob_gas_used;
 
                             // Check if the transaction made the block reach any of the limits
                             // for gas, native, pubdata or logs.
@@ -235,6 +238,7 @@ where
                                 next_block_computational_native_used,
                                 next_block_pubdata_used,
                                 block_logs_used,
+                                next_block_blob_gas_used,
                             ) {
                                 // Revert to state before transaction
                                 system.finish_global_frame(Some(&pre_tx_rollback_handle))?;
@@ -246,6 +250,7 @@ where
                                     next_block_computational_native_used;
                                 block_pubdata_used = next_block_pubdata_used;
                                 first_tx = false;
+                                block_blob_gas_used = next_block_blob_gas_used;
 
                                 // Finish the frame opened before processing the tx
                                 system.finish_global_frame(None)?;
@@ -357,7 +362,7 @@ where
     }
 
     /// Check if the transaction made the block reach any of the limits
-    /// for gas, native, pubdata or logs.
+    /// for gas (execution and blobs), native, pubdata or logs.
     /// If one such limit is reached, return the corresponding validation
     /// error.
     fn check_for_block_limits(
@@ -366,6 +371,7 @@ where
         computational_native_used: u64,
         pubdata_used: u64,
         logs_used: u64,
+        blob_gas_used: u64,
     ) -> Result<(), InvalidTransaction> {
         if cfg!(feature = "resources_for_tester") {
             // EVM tester uses some really high gas limits,
@@ -394,6 +400,11 @@ where
                     "Block logs limit reached, invalidating transaction\n"
                 ));
                 Err(InvalidTransaction::BlockL2ToL1LogsLimitReached)
+            } else if blob_gas_used > system.get_blob_gas_limit() {
+                let _ = logger.write_fmt(format_args!(
+                    "Block blob gas limit reached, invalidating transaction\n"
+                ));
+                Err(InvalidTransaction::BlockBlobGasLimitReached)
             } else {
                 Ok(())
             }
