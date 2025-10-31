@@ -1113,6 +1113,6 @@ dependencies = [
 
 [[package]]
 name = "zksync_os_evm_errors"
-version = "0.0.8"
+version = "0.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95ddc4ac82441385017e569ee1b060502a2af4d78c4fb7b24bcee70b0b96e6a3"
+checksum = "12685073683de64e01a87b0f0a8c1e11df2ea3d6dc3846f1320153ef2fe499ed"
