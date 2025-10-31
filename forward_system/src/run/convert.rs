@@ -30,6 +30,7 @@ impl FromInterface<BlockContext> for BlockMetadataFromOracle {
             gas_limit: value.gas_limit,
             pubdata_limit: value.pubdata_limit,
             mix_hash: value.mix_hash,
+            blob_fee: todo!(),
         }
     }
 }
@@ -73,6 +74,7 @@ impl IntoInterface<InvalidTransaction>
             basic_bootloader::bootloader::errors::InvalidTransaction::BlockL2ToL1LogsLimitReached => { InvalidTransaction::BlockL2ToL1LogsLimitReached }
             basic_bootloader::bootloader::errors::InvalidTransaction::AuthListIsEmpty => {InvalidTransaction::AuthListIsEmpty}
             basic_bootloader::bootloader::errors::InvalidTransaction::EIP7702HasNullDestination => {InvalidTransaction::EIP7702HasNullDestination}
+         _ =>              todo!()
         }
     }
 }

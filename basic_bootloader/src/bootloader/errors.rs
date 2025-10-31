@@ -93,6 +93,8 @@ pub enum InvalidTransaction {
     NonceNotIncreased,
     /// Transaction makes the block reach the gas limit
     BlockGasLimitReached,
+    /// Transaction makes the block reach the blob gas limit
+    BlockBlobGasLimitReached,
     /// Transaction makes the block reach the native resource limit
     BlockNativeLimitReached,
     /// Transaction makes the block reach the pubdata limit
@@ -103,6 +105,14 @@ pub enum InvalidTransaction {
     AuthListIsEmpty,
     /// 7702 has a null destination address
     EIP7702HasNullDestination,
+    /// Invalid blob hash
+    BlobElementIsNotSupported,
+    /// Blob base fee per gas greater than max fee per blob gas
+    BlobBaseFeeGreaterThanMaxFeePerBlobGas,
+    /// Blob list is longer than the maximum allowed
+    BlobListTooLong,
+    /// Transactions with blobs must have at least one.
+    EmptyBlobList,
 }
 
 ///

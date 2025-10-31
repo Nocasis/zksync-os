@@ -9,6 +9,7 @@ use crate::bootloader::errors::{InvalidTransaction, TxError};
 use crate::bootloader::runner::RunnerMemoryBuffers;
 use crate::bootloader::transaction_flow::ExecutionResult;
 use crate::{require, require_internal};
+use arrayvec::ArrayVec;
 use constants::L1_TX_INTRINSIC_NATIVE_COST;
 use constants::L1_TX_NATIVE_PRICE;
 use constants::L2_TX_INTRINSIC_NATIVE_COST;
@@ -22,11 +23,14 @@ use evm_interpreter::ERGS_PER_GAS;
 use gas_helpers::check_enough_resources_for_pubdata;
 use gas_helpers::get_resources_to_charge_for_pubdata;
 use gas_helpers::ResourcesForTx;
+use metadata::basic_metadata::BasicTransactionMetadata;
 use metadata::zk_metadata::TxLevelMetadata;
 use system_hooks::HooksStorage;
 use transaction::charge_keccak;
+use transaction::rlp_encoded::BlobHashesList;
 use zk_ee::interface_error;
 use zk_ee::internal_error;
+use zk_ee::system::constants::{MAX_BLOBS_PER_BLOCK, VERSIONED_HASH_VERSION_KZG};
 use zk_ee::system::errors::cascade::CascadedError;
 use zk_ee::system::errors::interface::InterfaceError;
 use zk_ee::system::errors::internal::InternalError;
@@ -401,6 +405,7 @@ where
             computational_native_used,
             native_used,
             pubdata_used: pubdata_used + L1_TX_INTRINSIC_PUBDATA,
+            blob_gas_used: 0,
         })
     }
 
@@ -427,6 +432,7 @@ where
         system.set_tx_context(TxLevelMetadata {
             tx_gas_price: gas_price,
             tx_origin: from,
+            blobs: ArrayVec::new(),
         });
 
         // Start a frame, to revert minting of value if execution fails
@@ -614,9 +620,32 @@ where
 
         F::charge_additional_intrinsic_gas(&mut resources, &transaction)?;
 
+        // No need to feature gate this part, as blobs() should return an empty list
+        // for non-EIP4844 transactions.
+        let blobs = if let Some(blobs_list) = transaction.blobs() {
+            let tx_max_fee_per_blob_gas = transaction.max_fee_per_blob_gas().ok_or(
+                internal_error!("Tx with blobs must define max_fee_per_blob_gas"),
+            )?;
+            let block_base_fee_per_blob_gas = system.get_blob_base_fee_per_gas();
+            if &block_base_fee_per_blob_gas > tx_max_fee_per_blob_gas {
+                return Err(TxError::Validation(
+                    InvalidTransaction::BlobBaseFeeGreaterThanMaxFeePerBlobGas,
+                ));
+            }
+
+            match parse_blobs_list::<MAX_BLOBS_PER_BLOCK>(blobs_list) {
+                Ok(blobs) => blobs,
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            arrayvec::ArrayVec::new()
+        };
         system.set_tx_context(TxLevelMetadata {
             tx_origin: from,
             tx_gas_price: gas_price,
+            blobs,
         });
 
         // Process access list
@@ -767,6 +796,9 @@ where
                 .as_str(),
         );
 
+        let num_blobs = system.metadata.num_blobs();
+        let blob_gas_used = num_blobs as u64 * GAS_PER_BLOB;
+
         Ok(TxProcessingResult {
             result: execution_result,
             tx_hash,
@@ -777,6 +809,7 @@ where
             computational_native_used,
             native_used,
             pubdata_used: pubdata_used + L2_TX_INTRINSIC_PUBDATA,
+            blob_gas_used,
         })
     }
 
@@ -1240,4 +1273,35 @@ where
     }
 
     Ok(())
+}
+
+pub fn parse_blobs_list<const MAX_BLOBS_IN_TX: usize>(
+    blobs_list: BlobHashesList<'_>,
+) -> Result<arrayvec::ArrayVec<Bytes32, MAX_BLOBS_IN_TX>, TxError> {
+    let mut result = arrayvec::ArrayVec::<_, MAX_BLOBS_IN_TX>::new();
+    if blobs_list.count > MAX_BLOBS_IN_TX {
+        return Err(TxError::Validation(InvalidTransaction::BlobListTooLong));
+    }
+
+    for blob_hash in blobs_list.iter() {
+        let blob_hash = blob_hash?;
+
+        if blob_hash[0] != VERSIONED_HASH_VERSION_KZG {
+            return Err(TxError::Validation(
+                InvalidTransaction::BlobElementIsNotSupported,
+            ));
+        }
+
+        // NOTE: we do NOT check that this blob hash is meaningful - we are not worried about block validity
+        // from consensus perspective. And KZG blob precompile requires explicit preimage anyway
+        let blob_hash = Bytes32::from_array(*blob_hash);
+        result.push(blob_hash);
+    }
+
+    if result.is_empty() {
+        // transactions that allow blobs should have at least one
+        return Err(TxError::Validation(InvalidTransaction::EmptyBlobList));
+    }
+
+    Ok(result)
 }
