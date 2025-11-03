@@ -57,14 +57,7 @@ fn run<const RANDOMIZED: bool>(
 
     let _ratio = compute_ratio(stats);
 
-    post_check(
-        output,
-        receipts,
-        diff_trace,
-        prestate_cache,
-        ruint::aliases::B160::from_be_bytes(miner.into()),
-    )
-    .unwrap();
+    post_check(output, receipts, diff_trace, prestate_cache).unwrap();
 
     Ok(())
 }
@@ -75,6 +68,7 @@ pub fn single_run(
     randomized: bool,
     witness_output_dir: Option<String>,
     chain_id: Option<u64>,
+    single_tx: Option<u64>,
 ) -> anyhow::Result<()> {
     use std::path::Path;
     let dir = Path::new(&block_dir);
@@ -104,7 +98,7 @@ pub fn single_run(
     let miner = block.result.header.beneficiary;
 
     let block_context = block.get_block_context();
-    let (transactions, skipped) = block.get_transactions(&calltrace);
+    let (transactions, skipped, _) = block.get_transactions(&calltrace, single_tx);
 
     let receipts = receipts
         .result
