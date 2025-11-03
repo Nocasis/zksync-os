@@ -87,35 +87,34 @@ entries:
             enabled: true
       eip4844_blobs:
         enabled: true
-        comment: We do not support blobs
         entries:
           test_blob_gas_subtraction_tx.json:
             hash: '0x100d33e5a224943a64150e306befe0ea'
-            enabled: false
+            enabled: true
           test_blob_tx_attribute_calldata_opcodes.json:
             hash: '0x066baad7214e4c84b723ac69be294339'
-            enabled: false
+            enabled: true
           test_blob_tx_attribute_gasprice_opcode.json:
             hash: '0x895f308ba5c99f47696cd379ec135655'
-            enabled: false
+            enabled: true
           test_blob_tx_attribute_opcodes.json:
             hash: '0x600e34482480049a5bf21cca9468d260'
-            enabled: false
+            enabled: true
           test_blob_tx_attribute_value_opcode.json:
             hash: '0xb491fc156ddbfda67bd84aae2d632e37'
-            enabled: false
+            enabled: true
           test_blob_type_tx_pre_fork.json:
             hash: '0xbbf80a989e4afc4c0c5134ec8e693a21'
-            enabled: false
+            enabled: true
           test_blobhash_gas_cost.json:
             hash: '0x725d2cf8f30ac487ba153fc525e1c163'
-            enabled: false
+            enabled: true
           test_blobhash_opcode_contexts.json:
             hash: '0x2c74a331336defe9905b91b84f559117'
-            enabled: false
+            enabled: true
           test_blobhash_opcode_contexts_tx_types.json:
             hash: '0xc7673bd8e01f891b0e387dffb04846a8'
-            enabled: false
+            enabled: true
           test_call_opcode_types.json:
             hash: '0xe510e5aac51775ee96f36dd6ec0a4a61'
             enabled: true
@@ -124,10 +123,10 @@ entries:
             enabled: true
           test_insufficient_balance_blob_tx.json:
             hash: '0x9b56b5d95e63a6c3acbb5dbea8f64153'
-            enabled: false
+            enabled: true
           test_invalid_blob_hash_versioning_single_tx.json:
             hash: '0x7483bfae7551dc070793fff8458f3ace'
-            enabled: false
+            enabled: true
           test_invalid_inputs.json:
             hash: '0xd5c3f3e8c93dea927e886cd2bde4fc02'
             enabled: true
@@ -136,10 +135,10 @@ entries:
             enabled: true
           test_invalid_tx_blob_count.json:
             hash: '0xc0a917003c37ac74c98b1d3bd4694d9b'
-            enabled: false
+            enabled: true
           test_invalid_tx_max_fee_per_blob_gas_state.json:
             hash: '0xf589882b706f6447d3a0bfd91c76a669'
-            enabled: false
+            enabled: true
           test_point_evaluation_precompile_gas_usage.json:
             hash: '0x92933fc5d145b184d5ee960f772000b3'
             enabled: true
@@ -148,7 +147,7 @@ entries:
             enabled: true
           test_sufficient_balance_blob_tx.json:
             hash: '0x0aac918de86d7be6b714555d08a89d4d'
-            enabled: false
+            enabled: true
           test_tx_entry_point.json:
             hash: '0xc22b35579f6d530aad5d13432c5ef572'
             enabled: true
@@ -890,11 +889,12 @@ entries:
                     hash: '0xd4af1ca06713eef07e472536d35b98bc'
                     enabled: true
               stEIP4844_blobtransactions:
-                enabled: false
+                enabled: true
                 entries:
                   createBlobhashTx.json:
                     hash: '0x97b8710f410fac123b66615c3f44b38b'
-                    enabled: true
+                    comment: Our testing setup doesn't let us make a deployment 4844 tx
+                    enabled: false
                   emptyBlobhashList.json:
                     hash: '0x355daf71d84629eecd27a90675695cf8'
                     enabled: true

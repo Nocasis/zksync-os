@@ -134,8 +134,7 @@ entries:
             hash: '0x17530574cdaecc40b36061568b522076'
             enabled: true
       eip4844_blobs:
-        enabled: false
-        comment: Blobs not supported
+        enabled: true
         entries:
           test_blob_gas_subtraction_tx.json:
             hash: '0x77544a8d5b3cfc8edfaf8fdef08fe537'
@@ -181,7 +180,8 @@ entries:
             enabled: true
           test_correct_excess_blob_gas_calculation.json:
             hash: '0x55507d411213ac56de8fcb6a1541f61c'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_correct_increasing_blob_gas_costs.json:
             hash: '0x4e86aadeda3b6e771f68853cfad6fa40'
             enabled: true
@@ -190,10 +190,12 @@ entries:
             enabled: true
           test_fork_transition_excess_blob_gas_at_blob_genesis.json:
             hash: '0x241d4a8725ff79dc733a1ad6cbabc802'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_fork_transition_excess_blob_gas_post_blob_genesis.json:
             hash: '0x751208c1aaadfa2d3ad597b0cddab79e'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_insufficient_balance_blob_tx.json:
             hash: '0x2b7c698e28e5ce15e9c78177405142bc'
             enabled: true
@@ -202,7 +204,8 @@ entries:
             enabled: true
           test_invalid_blob_gas_used_in_header.json:
             hash: '0xaa9f15a52bd7bc64947b7a0d472b3b72'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_blob_hash_versioning_multiple_txs.json:
             hash: '0x3e8aa5eba9def23ec4ea2bf5f09e7abd'
             enabled: true
@@ -211,28 +214,34 @@ entries:
             enabled: true
           test_invalid_blob_tx_contract_creation.json:
             hash: '0x67faacb05c2a31ef3611d9837de33fa9'
-            enabled: true
+            comment: rlp encoded block not supported
+            enabled: false
           test_invalid_block_blob_count.json:
             hash: '0xf5e447b12c9d6eb18704026817c7b7c0'
             enabled: true
           test_invalid_excess_blob_gas_above_target_change.json:
             hash: '0xcd2a61edaf902402ec5c014cc25bee59'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_excess_blob_gas_change.json:
             hash: '0x6a7485331ac8eccebb28d6930ba42b9d'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_excess_blob_gas_target_blobs_increase_from_zero.json:
             hash: '0x15f10a237d21f110e3b29619d35a7871'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_inputs.json:
             hash: '0x0275bc8c28a03bc2d2cbe6c4e80e800b'
             enabled: true
           test_invalid_negative_excess_blob_gas.json:
             hash: '0x7fea2c86939670050861cd251cc16825'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_non_multiple_excess_blob_gas.json:
             hash: '0x67db1cf2ea4f0e1c1f9b2ddb967732a8'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_normal_gas.json:
             hash: '0x23660724ce478c6969001128659714cc'
             enabled: true
@@ -244,10 +253,12 @@ entries:
             enabled: true
           test_invalid_static_excess_blob_gas.json:
             hash: '0x2986cab0b0b1b3671252ad43fe5e9d27'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_static_excess_blob_gas_from_zero_on_blobs_above_target.json:
             hash: '0xc7eb7c8e09c4d50e2d3bdbd8a458f490'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_tx_blob_count.json:
             hash: '0x42abacf1cd65df2f388df40238e7e30c'
             enabled: true
@@ -256,7 +267,8 @@ entries:
             enabled: true
           test_invalid_zero_excess_blob_gas_in_header.json:
             hash: '0xf4c612235223a0e0ff714fe02969388d'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_point_evaluation_precompile_gas_usage.json:
             hash: '0x5c172455abe91f7dd8bc724d514dcfa0'
             enabled: true
@@ -268,7 +280,8 @@ entries:
             enabled: true
           test_reject_valid_full_blob_in_block_rlp.json:
             hash: '0xd2062c3bd8cc7b303934b50d1fd4548f'
-            enabled: true
+            enabled: false
+            comment: rlp encoded block not supported
           test_sufficient_balance_blob_tx.json:
             hash: '0x4c27f668d0eb6dce95c5ad54c06518f2'
             enabled: true
@@ -354,8 +367,7 @@ entries:
             hash: '0x8d90943c56cde841537b571222862b75'
             enabled: true
       eip7516_blobgasfee:
-        enabled: false
-        comment: Blobs not supported
+        enabled: true
         entries:
           test_blobbasefee_before_fork.json:
             hash: '0xe43b2570abe2ac502bcdd0aae1aa609c'
@@ -1270,11 +1282,12 @@ entries:
                     hash: '0xe089f0d9ee55b48d4b285476e9d5002f'
                     enabled: true
               stEIP4844_blobtransactions:
-                enabled: false
+                enabled: true
                 entries:
                   createBlobhashTx.json:
                     hash: '0x171eb00fad12f6e5a88b6f21093162b6'
-                    enabled: true
+                    comment: Our testing setup doesn't let us make a deployment 4844 tx
+                    enabled: false
                   emptyBlobhashList.json:
                     hash: '0x721fb6109f389e9c2ecc3a0a4793349e'
                     enabled: true

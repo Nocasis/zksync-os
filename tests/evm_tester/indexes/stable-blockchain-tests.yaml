@@ -134,8 +134,7 @@ entries:
             hash: '0x5a736d06df56256efdfedbbb8121af6f'
             enabled: true
       eip4844_blobs:
-        enabled: false
-        comment: Blobs not supported
+        enabled: true
         entries:
           test_blob_gas_subtraction_tx.json:
             hash: '0xb994cdca2c118f4babc1f4d2dd0c857a'
@@ -178,7 +177,8 @@ entries:
             enabled: true
           test_correct_decreasing_blob_gas_costs.json:
             hash: '0x032df0e0ce56d393c7623afe97d27a79'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_correct_excess_blob_gas_calculation.json:
             hash: '0xd7e80bab98a773d23ccfd662ff69a44e'
             enabled: true
@@ -190,10 +190,12 @@ entries:
             enabled: true
           test_fork_transition_excess_blob_gas_at_blob_genesis.json:
             hash: '0x241d4a8725ff79dc733a1ad6cbabc802'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_fork_transition_excess_blob_gas_post_blob_genesis.json:
             hash: '0x81137e25fee5afa16532de191e5cf703'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_insufficient_balance_blob_tx.json:
             hash: '0xebb1229734a844d00cf1d6707e40f6e3'
             enabled: true
@@ -202,7 +204,8 @@ entries:
             enabled: true
           test_invalid_blob_gas_used_in_header.json:
             hash: '0x493a030eed13b09fc548bdeec48b614b'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_blob_hash_versioning_multiple_txs.json:
             hash: '0x9dd037b13f397bfb952a435c5e1f33fc'
             enabled: true
@@ -211,28 +214,34 @@ entries:
             enabled: true
           test_invalid_blob_tx_contract_creation.json:
             hash: '0xc23aa513a381a25299363fddefb05beb'
-            enabled: true
+            comment: rlp encoded block not supported
+            enabled: false
           test_invalid_block_blob_count.json:
             hash: '0x36295be642477324c9a554b1e96bc7b6'
             enabled: true
           test_invalid_excess_blob_gas_above_target_change.json:
             hash: '0x6c83d28bd7027b93f252a336372eb054'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_excess_blob_gas_change.json:
             hash: '0xf89e1d2782908be88b3beac8471f101f'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_excess_blob_gas_target_blobs_increase_from_zero.json:
             hash: '0x5a90c22242b166b5f27f7b59e1db9771'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_inputs.json:
             hash: '0x2458e3638436ed2d7872f4e6fcde99e4'
             enabled: true
           test_invalid_negative_excess_blob_gas.json:
             hash: '0xf476a081cf9b9fdde2efc1790dac056b'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_non_multiple_excess_blob_gas.json:
             hash: '0xbac449170206a46f431181a4213afe98'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_normal_gas.json:
             hash: '0x34d2a8955450740f5c17838f3a2bc23a'
             enabled: true
@@ -244,10 +253,12 @@ entries:
             enabled: true
           test_invalid_static_excess_blob_gas.json:
             hash: '0xd9f615e147ce568f5db6d3f2c4ab860e'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_static_excess_blob_gas_from_zero_on_blobs_above_target.json:
             hash: '0xffe8358d521d50cfeb30fcf7e7dd06ef'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_invalid_tx_blob_count.json:
             hash: '0x28a83f35a70b9e066bd6856268dc7925'
             enabled: true
@@ -256,7 +267,8 @@ entries:
             enabled: true
           test_invalid_zero_excess_blob_gas_in_header.json:
             hash: '0xd7bb3425265d3fa8ddcf8edeff33b261'
-            enabled: true
+            enabled: false
+            comment: Excess blob gas calculation not supported yet
           test_point_evaluation_precompile_gas_usage.json:
             hash: '0xe6235a882f0adf29b94b925b94a17457'
             enabled: true
@@ -268,7 +280,8 @@ entries:
             enabled: true
           test_reject_valid_full_blob_in_block_rlp.json:
             hash: '0x2bd5d6df60fa188ad671029928e9400d'
-            enabled: true
+            enabled: false
+            comment: rlp encoded block not supported
           test_sufficient_balance_blob_tx.json:
             hash: '0x046a4e3947e2f0a7169b96ff1da4ca19'
             enabled: true
@@ -354,8 +367,7 @@ entries:
             hash: '0x1378ffa92e27bcb2ffe441e6a4193661'
             enabled: true
       eip7516_blobgasfee:
-        enabled: false
-        comment: Blobs not supported
+        enabled: true
         entries:
           test_blobbasefee_before_fork.json:
             hash: '0xe43b2570abe2ac502bcdd0aae1aa609c'
