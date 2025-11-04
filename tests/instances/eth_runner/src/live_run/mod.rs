@@ -93,38 +93,15 @@ fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Resul
         }
         None => {
             let rpc_start = Instant::now();
-            let block = rpc::get_block(endpoint, block_number)
-                .context(format!("Failed to fetch block for {block_number}"))?;
-            let block_time = rpc_start.elapsed();
             
-            let prestate_start = Instant::now();
-            let prestate = rpc::get_prestate(endpoint, block_number)
-                .context(format!("Failed to fetch prestate trace for {block_number}"))?;
-            let prestate_time = prestate_start.elapsed();
+            // Use batched RPC call - single HTTP request instead of 5
+            let (block, prestate, diff, receipts, call) = rpc::get_all_block_traces(endpoint, block_number)
+                .context(format!("Failed to fetch block traces for {block_number}"))?;
             
-            let diff_start = Instant::now();
-            let diff = rpc::get_difftrace(endpoint, block_number)
-                .context(format!("Failed to fetch diff trace for {block_number}"))?;
-            let diff_time = diff_start.elapsed();
-            
-            let receipts_start = Instant::now();
-            let receipts = rpc::get_receipts(endpoint, block_number)
-                .context(format!("Failed to fetch block receipts for {block_number}"))?;
-            let receipts_time = receipts_start.elapsed();
-            
-            let call_start = Instant::now();
-            let call = rpc::get_calltrace(endpoint, block_number)
-                .context(format!("Failed to fetch call trace for {block_number}"))?;
-            let call_time = call_start.elapsed();
             let total_rpc_time = rpc_start.elapsed();
             
-            debug!("RPC calls for block {}: block={:.2}ms, prestate={:.2}ms, diff={:.2}ms, receipts={:.2}ms, call={:.2}ms, total={:.2}ms",
+            debug!("RPC call for block {} (batched): total={:.2}ms",
                 block_number,
-                block_time.as_secs_f64() * 1000.0,
-                prestate_time.as_secs_f64() * 1000.0,
-                diff_time.as_secs_f64() * 1000.0,
-                receipts_time.as_secs_f64() * 1000.0,
-                call_time.as_secs_f64() * 1000.0,
                 total_rpc_time.as_secs_f64() * 1000.0
             );
             
