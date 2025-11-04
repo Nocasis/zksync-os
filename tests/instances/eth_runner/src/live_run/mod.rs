@@ -1,10 +1,11 @@
 use alloy::primitives::U256;
 use anyhow::{anyhow, Context, Ok, Result};
-use db::{BlockStatus, BlockTraces, Database, ResourceInfo};
 mod db;
 mod rpc;
+use db::{BlockStatus, BlockTraces, Database, ResourceInfo};
 use rig::log::{debug, error, info, warn};
 use rig::Chain;
+use std::time::Instant;
 use zk_ee::system::tracer::NopTracer;
 
 use crate::calltrace::CallTrace;
@@ -91,16 +92,42 @@ fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Resul
             Ok(traces)
         }
         None => {
+            let rpc_start = Instant::now();
             let block = rpc::get_block(endpoint, block_number)
                 .context(format!("Failed to fetch block for {block_number}"))?;
+            let block_time = rpc_start.elapsed();
+            
+            let prestate_start = Instant::now();
             let prestate = rpc::get_prestate(endpoint, block_number)
                 .context(format!("Failed to fetch prestate trace for {block_number}"))?;
+            let prestate_time = prestate_start.elapsed();
+            
+            let diff_start = Instant::now();
             let diff = rpc::get_difftrace(endpoint, block_number)
                 .context(format!("Failed to fetch diff trace for {block_number}"))?;
+            let diff_time = diff_start.elapsed();
+            
+            let receipts_start = Instant::now();
             let receipts = rpc::get_receipts(endpoint, block_number)
                 .context(format!("Failed to fetch block receipts for {block_number}"))?;
+            let receipts_time = receipts_start.elapsed();
+            
+            let call_start = Instant::now();
             let call = rpc::get_calltrace(endpoint, block_number)
                 .context(format!("Failed to fetch call trace for {block_number}"))?;
+            let call_time = call_start.elapsed();
+            let total_rpc_time = rpc_start.elapsed();
+            
+            debug!("RPC calls for block {}: block={:.2}ms, prestate={:.2}ms, diff={:.2}ms, receipts={:.2}ms, call={:.2}ms, total={:.2}ms",
+                block_number,
+                block_time.as_secs_f64() * 1000.0,
+                prestate_time.as_secs_f64() * 1000.0,
+                diff_time.as_secs_f64() * 1000.0,
+                receipts_time.as_secs_f64() * 1000.0,
+                call_time.as_secs_f64() * 1000.0,
+                total_rpc_time.as_secs_f64() * 1000.0
+            );
+            
             let block_traces = BlockTraces {
                 block,
                 prestate,
@@ -133,8 +160,13 @@ fn run_block(
     single_tx: Option<u64>,
     gpu_shared_state: &mut Option<&mut GpuSharedState>,
     only_forward: bool,
+    profile: Option<String>,
 ) -> Result<BlockStatus> {
+    let block_start = Instant::now();
+    
+    let fetch_start = Instant::now();
     let block_traces = fetch_block_traces(block_number, db, endpoint)?;
+    let fetch_time = fetch_start.elapsed();
     let traces_clone = block_traces.clone();
 
     let BlockTraces {
@@ -202,25 +234,54 @@ fn run_block(
             .collect(),
     };
 
+    let setup_start = Instant::now();
     let mut chain = Chain::empty_randomized(Some(chain_id));
     chain.set_last_block_number(block_number - 1);
 
+    let db_hash_start = Instant::now();
     chain.set_block_hashes(get_block_hashes_array(block_number, db)?);
+    let db_hash_time = db_hash_start.elapsed();
 
+    let prestate_start = Instant::now();
     let prestate_cache = populate_prestate(&mut chain, ps_trace, &calltrace);
+    let prestate_time = prestate_start.elapsed();
+    let setup_time = setup_start.elapsed();
 
     let output_path = witness_output_dir.map(|dir| {
         let mut suffix = block_number.to_string();
         suffix.push_str("_witness");
         std::path::Path::new(&dir).join(suffix)
     });
+    
+    // Set up profiling if requested - include block number in filename
+    let profiler_config = profile.map(|profile_path| {
+        use std::path::PathBuf;
+        let path = if profile_path.ends_with(".svg") {
+            // If path ends with .svg, insert block number before extension
+            let mut path = PathBuf::from(&profile_path);
+            let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("flamegraph");
+            let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            parent.join(format!("{}_block_{}.svg", file_stem, block_number))
+        } else {
+            // If no extension, append block number
+            PathBuf::from(format!("{}_{}", profile_path, block_number))
+        };
+        let mut profiler = rig::ProfilerConfig::new(path);
+        // Sample every 10th cycle for performance
+        profiler.frequency_recip = 10;
+        profiler
+    });
+    
     let run_config = rig::chain::RunConfig {
         witness_output_file: output_path,
         only_forward,
         app: Some("evm_replay".to_string()),
         check_storage_diff_hashes: true,
+        profiler_config,
         ..Default::default()
     };
+    
+    let execution_start = Instant::now();
     let (output, stats, _prover_input) = chain
         .run_block_with_extra_stats(
             transactions,
@@ -229,6 +290,7 @@ fn run_block(
             &mut NopTracer::default(),
         )
         .unwrap();
+    let execution_time = execution_start.elapsed();
 
     info!("Actual gas used: {}", output.header.gas_used);
 
@@ -260,6 +322,7 @@ fn run_block(
         info!("Done with base layer proofs");
     }
 
+    let db_write_start = Instant::now();
     if let Some(ratio) = compute_ratio(stats) {
         db.set_block_ratio(block_number, ratio)?;
     }
@@ -279,8 +342,27 @@ fn run_block(
         .collect();
 
     db.set_block_resource_infos(block_number, resource_infos)?;
+    let db_write_time = db_write_start.elapsed();
 
-    match post_check(output, receipts, diff_trace, prestate_cache) {
+    let post_check_start = Instant::now();
+    let post_check_result = post_check(output, receipts, diff_trace, prestate_cache);
+    let post_check_time = post_check_start.elapsed();
+    
+    let total_time = block_start.elapsed();
+    
+    // Log timing breakdown
+    info!("=== Block {} Timing Breakdown ===", block_number);
+    info!("  Fetch traces:     {:6.2}ms ({:5.1}%)", fetch_time.as_secs_f64() * 1000.0, fetch_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    info!("  Setup:             {:6.2}ms ({:5.1}%)", setup_time.as_secs_f64() * 1000.0, setup_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    info!("    - DB hash read: {:6.2}ms", db_hash_time.as_secs_f64() * 1000.0);
+    info!("    - Prestate:     {:6.2}ms", prestate_time.as_secs_f64() * 1000.0);
+    info!("  Execution:         {:6.2}ms ({:5.1}%)", execution_time.as_secs_f64() * 1000.0, execution_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    info!("  Post-check:        {:6.2}ms ({:5.1}%)", post_check_time.as_secs_f64() * 1000.0, post_check_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    info!("  DB writes:         {:6.2}ms ({:5.1}%)", db_write_time.as_secs_f64() * 1000.0, db_write_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    info!("  Total:             {:6.2}ms", total_time.as_secs_f64() * 1000.0);
+    info!("===================================");
+
+    match post_check_result {
         core::result::Result::Ok(()) => {
             db.set_block_status(block_number, db::BlockStatus::Success)?;
             if persist_all {
@@ -310,6 +392,7 @@ fn run_block_with_retries(
     single_tx: Option<u64>,
     gpu_shared_state: &mut Option<&mut GpuSharedState>,
     only_forward: bool,
+    profile: Option<String>,
 ) -> Result<BlockStatus> {
     const MAX_RETRIES: usize = 3;
 
@@ -324,6 +407,7 @@ fn run_block_with_retries(
             single_tx,
             gpu_shared_state,
             only_forward,
+            profile.clone(), // Clone to avoid moving on first attempt
         ) {
             core::result::Result::Ok(BlockStatus::Success) => return Ok(BlockStatus::Success),
             e if attempt < MAX_RETRIES => {
@@ -356,15 +440,25 @@ pub fn live_run(
     webhook: Option<String>,
     single_tx: Option<u64>,
     only_forward: bool,
+    profile: Option<String>,
 ) -> Result<()> {
+    let run_start = Instant::now();
+    
     if let Some(webhook) = webhook.clone() {
         install_panic_hook(webhook);
     }
+    
+    let init_start = Instant::now();
     let db = Database::init(db_path)?;
     assert!(start_block <= end_block);
     fetch_block_hashes(start_block, &db, &endpoint)?;
     let chain_id = rpc::get_chain_id(&endpoint)?;
+    let init_time = init_start.elapsed();
     let mut failures = 0;
+    
+    info!("=== Live Run Started ===");
+    info!("Blocks: {} to {}", start_block, end_block);
+    info!("Initialization: {:.2}ms", init_time.as_secs_f64() * 1000.0);
 
     #[cfg(feature = "gpu")]
     let mut gpu_state = {
@@ -388,14 +482,26 @@ pub fn live_run(
     #[cfg(not(feature = "gpu"))]
     let gpu_state = &mut None;
 
+    let mut total_block_time = std::time::Duration::ZERO;
+    let mut total_overhead_time = std::time::Duration::ZERO;
+    let mut blocks_actually_processed = 0u64;
+
     for n in start_block..=end_block {
+        let loop_iter_start = Instant::now();
+        
+        let status_check_start = Instant::now();
         let status = db.get_block_status(n)?;
+        let status_check_time = status_check_start.elapsed();
         let already_succeeded = status.is_some_and(|s| matches!(s, BlockStatus::Success));
+        
         if skip_successful && already_succeeded {
             debug!("Skipping block {n}, already succeeded");
+            total_overhead_time += loop_iter_start.elapsed();
             continue;
         }
-        if let BlockStatus::Error(e) = run_block_with_retries(
+        
+        let block_start = Instant::now();
+        let block_result = run_block_with_retries(
             n,
             &db,
             &endpoint,
@@ -405,18 +511,63 @@ pub fn live_run(
             single_tx,
             gpu_state,
             only_forward,
-        )? {
+            profile.clone(),
+        );
+        let block_time = block_start.elapsed();
+        
+        if let BlockStatus::Error(e) = block_result? {
             failures += 1;
+            let webhook_start = Instant::now();
             if let Some(webhook) = webhook.as_ref() {
                 let msg = format!(":rotating_light: eth_runner: Block {n} on chain with id {chain_id} failed with: {e:?}");
                 send_slack(webhook, &msg)?
             }
+            total_overhead_time += webhook_start.elapsed();
+            
             if failures == MAX_FAILURES {
                 error!("Reached max number of failures");
                 panic!()
             }
         }
+        
+        blocks_actually_processed += 1;
+        total_block_time += block_time;
+        total_overhead_time += status_check_time + (loop_iter_start.elapsed() - block_time - status_check_time);
     }
+    
+    let total_time = run_start.elapsed();
+    let blocks_in_range = (end_block - start_block + 1) as f64;
+    let total_overhead_other = total_time
+        .saturating_sub(init_time)
+        .saturating_sub(total_block_time)
+        .saturating_sub(total_overhead_time);
+    
+    info!("=== Live Run Completed ===");
+    info!("Blocks in range: {} ({} to {})", blocks_in_range as u64, start_block, end_block);
+    info!("Blocks actually processed: {}", blocks_actually_processed);
+    info!("Blocks skipped: {}", blocks_in_range as u64 - blocks_actually_processed);
+    info!("Failures: {}", failures);
+    info!("");
+    info!("=== Timing Breakdown ===");
+    info!("  Initialization:      {:6.2}ms ({:5.1}%)", init_time.as_secs_f64() * 1000.0, init_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    if blocks_actually_processed > 0 {
+        info!("  Block execution:      {:6.2}ms ({:5.1}%)", total_block_time.as_secs_f64() * 1000.0, total_block_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", total_overhead_time.as_secs_f64() * 1000.0, total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        info!("    (status checks, loop, webhooks)");
+    }
+    info!("  Other overhead:      {:6.2}ms ({:5.1}%)", total_overhead_other.as_secs_f64() * 1000.0, total_overhead_other.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    info!("  Total:               {:6.2}ms ({:5.1}%)", total_time.as_secs_f64() * 1000.0, 100.0);
+    info!("");
+    if blocks_actually_processed > 0 {
+        let avg_time_per_block = total_block_time.as_secs_f64() / blocks_actually_processed as f64;
+        let avg_total_per_block = total_time.as_secs_f64() / blocks_actually_processed as f64;
+        info!("=== Per Block Averages ===");
+        info!("  Execution time:      {:.2}ms", avg_time_per_block * 1000.0);
+        info!("  Total time (w/ overhead): {:.2}ms", avg_total_per_block * 1000.0);
+        info!("  Blocks per second:   {:.2}", blocks_actually_processed as f64 / total_time.as_secs_f64());
+    }
+    info!("==========================");
+    
     if let Some(webhook) = webhook.as_ref() {
         let msg = format!(":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!");
         send_slack(webhook, &msg)?
