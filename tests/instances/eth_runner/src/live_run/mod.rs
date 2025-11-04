@@ -51,18 +51,41 @@ fn install_panic_hook(webhook: String) {
 
 // Fetches hashes for the N_PREV_BLOCKS previous to [start_block].
 // Persists them in DB.
+// Uses batched RPC call to fetch all missing hashes in a single request.
 fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result<()> {
     let first = start_block.saturating_sub(N_PREV_BLOCKS as u64);
+    
+    // Collect all block numbers that need to be fetched
+    let mut blocks_to_fetch = Vec::new();
     for n in first..start_block {
-        if db.get_block_hash(n)?.is_some() {
-            debug!("Block hash for {n} already in DB, skipping");
+        if db.get_block_hash(n)?.is_none() {
+            blocks_to_fetch.push(n);
         } else {
-            let hash = rpc::get_block_hash(endpoint, n)
-                .context(format!("Failed to fetch block hash for {n}"))?;
-            db.set_block_hash(n, U256::from_be_bytes(hash.0))?;
-            debug!("Saved block hash for block {n}: {hash:#x}");
+            debug!("Block hash for {n} already in DB, skipping");
         }
     }
+    
+    if blocks_to_fetch.is_empty() {
+        debug!("All block hashes already in DB, skipping fetch");
+        return Ok(());
+    }
+    
+    debug!("Fetching {} block hashes in batched RPC call", blocks_to_fetch.len());
+    
+    // Fetch all missing hashes in a single batched RPC call
+    let hashes = rpc::get_block_hashes_batch(endpoint, &blocks_to_fetch)
+        .context(format!("Failed to fetch block hashes in batch"))?;
+    
+    // Save all hashes to DB
+    for block_num in blocks_to_fetch {
+        if let Some(hash) = hashes.get(&block_num) {
+            db.set_block_hash(block_num, U256::from_be_bytes(hash.0))?;
+            debug!("Saved block hash for block {block_num}: {hash:#x}");
+        } else {
+            return Err(anyhow!("Missing hash for block {block_num} in batched response"));
+        }
+    }
+    
     Ok(())
 }
 

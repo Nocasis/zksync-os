@@ -49,6 +49,102 @@ pub fn get_block_hash(endpoint: &str, block_number: u64) -> Result<B256> {
     Ok(hash)
 }
 
+/// Fetches multiple block hashes in batched RPC calls.
+/// Chunks requests into batches of 50 to respect rate limits.
+/// Returns a HashMap mapping block_number -> B256 hash.
+pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<std::collections::HashMap<u64, B256>> {
+    if block_numbers.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    
+    const BATCH_SIZE: usize = 40; // Rate limit: 50 requests per second, TODO: adjust this to be more accurate
+    let mut all_hashes = std::collections::HashMap::new();
+    
+    debug!("RPC: get_block_hashes_batch({} blocks) - will be chunked into batches of {}", block_numbers.len(), BATCH_SIZE);
+    
+    // Process in chunks of BATCH_SIZE to respect rate limits
+    let chunks: Vec<_> = block_numbers.chunks(BATCH_SIZE).collect();
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        debug!("RPC: fetching batch {} of {} ({} block hashes)", chunk_idx + 1, chunks.len(), chunk.len());
+        
+        // Create a batched JSON-RPC request for this chunk
+        let batch: Vec<serde_json::Value> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, &block_num)| {
+                json!({
+                    "method": "eth_getBlockByNumber",
+                    "params": [to_hex(block_num), false], // false = don't need full block, just header
+                    "id": i,
+                    "jsonrpc": "2.0"
+                })
+            })
+            .collect();
+        
+        let response = send(endpoint, json!(batch))?;
+        
+        // Parse the batched response (array of responses)
+        let response_value: serde_json::Value = serde_json::from_str(&response)
+            .context(format!("Failed to parse batched RPC response for block hashes. Response: {}", response))?;
+        
+        // Check if it's an array (batched response) or a single object (error)
+        let responses = if response_value.is_array() {
+            response_value.as_array()
+                .ok_or_else(|| anyhow!("Failed to parse response as array"))?
+                .clone()
+        } else {
+            return Err(anyhow!("Expected batched response (array), got single response: {}", response_value));
+        };
+        
+        if responses.len() != chunk.len() {
+            return Err(anyhow!("Expected {} responses in batch, got {}. Response: {}", chunk.len(), responses.len(), response));
+        }
+        
+        // Extract results by ID
+        for (i, resp) in responses.into_iter().enumerate() {
+            // Check if it's a valid response object
+            if !resp.is_object() {
+                return Err(anyhow!("Expected response object, got: {}", resp));
+            }
+            
+            let id = resp.get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow!("Missing or invalid id in batch response: {}", resp))?;
+            
+            if id as usize != i {
+                return Err(anyhow!("Unexpected id in batch response: expected {}, got {}", i, id));
+            }
+            
+            // Check for errors
+            if let Some(error) = resp.get("error") {
+                return Err(anyhow!("RPC error in batch response (id={}): {}", id, error));
+            }
+            
+            let result = resp.get("result")
+                .ok_or_else(|| anyhow!("Missing result in batch response (id={}). Response object: {}", id, resp))?;
+            
+            // Extract hash from result
+            let hash_hex = result.get("hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("Missing hash in result for block number {}", chunk[i]))?;
+            
+            let hash = B256::from_str(hash_hex)?;
+            all_hashes.insert(chunk[i], hash);
+        }
+        
+        // Add a delay between batches to respect rate limits (50 requests/second)
+        // Only sleep if there are more chunks to process
+        if chunk_idx < chunks.len() - 1 {
+            // Wait 1.5 seconds before next batch to respect 50 req/s limit
+            use std::thread;
+            use std::time::Duration;
+            thread::sleep(Duration::from_millis(1500)); // TODO Adjust this to be more accurate
+        }
+    }
+    
+    Ok(all_hashes)
+}
+
 /// Fetches the block receipts.
 pub fn get_receipts(endpoint: &str, block_number: u64) -> Result<BlockReceipts> {
     debug!("RPC: get_receipts({block_number})");
