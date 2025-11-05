@@ -23,6 +23,7 @@ use std::panic;
 
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
+const PREFETCH_SIZE: usize = 8; // Prefetch 8 blocks ahead (8 * 5 = 40 RPC calls, under 50 req/s limit)
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
@@ -140,6 +141,71 @@ fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Resul
     }
 }
 
+/// Fetches block traces for multiple blocks in a single batched HTTP request.
+/// Returns a HashMap mapping block_number -> BlockTraces.
+/// Blocks already in DB are skipped and returned from cache.
+fn fetch_block_traces_batch(
+    block_numbers: &[u64],
+    db: &Database,
+    endpoint: &str,
+) -> Result<std::collections::HashMap<u64, BlockTraces>> {
+    let total_start = Instant::now();
+    
+    let db_check_start = Instant::now();
+    let mut blocks_to_fetch = Vec::new();
+    let mut results = std::collections::HashMap::new();
+    
+    for &block_number in block_numbers {
+        if let Some(traces) = db.get_block_traces(block_number)? {
+            debug!("Block traces for {block_number} already in DB, skipping");
+            results.insert(block_number, traces);
+        } else {
+            blocks_to_fetch.push(block_number);
+        }
+    }
+    let db_check_time = db_check_start.elapsed();
+    
+    if blocks_to_fetch.is_empty() {
+        debug!("All blocks already in DB, skipping RPC fetch");
+        return Ok(results);
+    }
+    
+    debug!("Fetching {} blocks in batched RPC call (DB check: {:.2}ms)", 
+        blocks_to_fetch.len(),
+        db_check_time.as_secs_f64() * 1000.0
+    );
+    
+    let rpc_start = Instant::now();
+    let batch_results = rpc::get_all_block_traces_batch(endpoint, &blocks_to_fetch)
+        .context("Failed to fetch block traces in batch")?;
+    let rpc_time = rpc_start.elapsed();
+    
+    let parse_start = Instant::now();
+    for (block_number, (block, prestate, diff, receipts, call)) in batch_results {
+        results.insert(block_number, BlockTraces {
+            block,
+            prestate,
+            diff,
+            receipts,
+            call,
+        });
+    }
+    let parse_time = parse_start.elapsed();
+    
+    let total_time = total_start.elapsed();
+    info!("Batched RPC call for {} blocks: total={:.2}ms (DB check: {:.2}ms, RPC: {:.2}ms, parse: {:.2}ms, {:.2}ms per block, {:.1} RPC calls)",
+        blocks_to_fetch.len(),
+        total_time.as_secs_f64() * 1000.0,
+        db_check_time.as_secs_f64() * 1000.0,
+        rpc_time.as_secs_f64() * 1000.0,
+        parse_time.as_secs_f64() * 1000.0,
+        total_time.as_secs_f64() * 1000.0 / blocks_to_fetch.len() as f64,
+        blocks_to_fetch.len() * 5
+    );
+    
+    Ok(results)
+}
+
 #[cfg(feature = "gpu")]
 type GpuSharedState = rig::cli_lib::prover_utils::GpuSharedState;
 
@@ -162,11 +228,38 @@ fn run_block(
     only_forward: bool,
     profile: Option<String>,
 ) -> Result<BlockStatus> {
-    let block_start = Instant::now();
-    
-    let fetch_start = Instant::now();
     let block_traces = fetch_block_traces(block_number, db, endpoint)?;
-    let fetch_time = fetch_start.elapsed();
+    run_block_with_prefetch(
+        block_number,
+        db,
+        endpoint,
+        witness_output_dir,
+        persist_all,
+        chain_id,
+        single_tx,
+        gpu_shared_state,
+        only_forward,
+        profile,
+        block_traces,
+    )
+}
+
+/// Runs a block using prefetched traces.
+#[allow(clippy::too_many_arguments, unused_variables)]
+fn run_block_with_prefetch(
+    block_number: u64,
+    db: &Database,
+    endpoint: &str,
+    witness_output_dir: Option<String>,
+    persist_all: bool,
+    chain_id: u64,
+    single_tx: Option<u64>,
+    gpu_shared_state: &mut Option<&mut GpuSharedState>,
+    only_forward: bool,
+    profile: Option<String>,
+    block_traces: BlockTraces,
+) -> Result<BlockStatus> {
+    let block_start = Instant::now();
     let traces_clone = block_traces.clone();
 
     let BlockTraces {
@@ -352,6 +445,8 @@ fn run_block(
     
     // Log timing breakdown
     info!("=== Block {} Timing Breakdown ===", block_number);
+    // Fetch time is 0 since traces are prefetched
+    let fetch_time = std::time::Duration::ZERO;
     info!("  Fetch traces:     {:6.2}ms ({:5.1}%)", fetch_time.as_secs_f64() * 1000.0, fetch_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
     info!("  Setup:             {:6.2}ms ({:5.1}%)", setup_time.as_secs_f64() * 1000.0, setup_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
     info!("    - DB hash read: {:6.2}ms", db_hash_time.as_secs_f64() * 1000.0);
@@ -484,10 +579,65 @@ pub fn live_run(
 
     let mut total_block_time = std::time::Duration::ZERO;
     let mut total_overhead_time = std::time::Duration::ZERO;
+    let mut total_prefetch_time = std::time::Duration::ZERO;
     let mut blocks_actually_processed = 0u64;
-
+    let mut prefetch_hits = 0u64;
+    let mut prefetch_misses = 0u64;
+    let mut total_blocks_prefetched = 0u64;
+    
+    let mut prefetch_cache = std::collections::HashMap::<u64, BlockTraces>::new();
+    let mut last_prefetched_block = start_block.saturating_sub(1);
+    
     for n in start_block..=end_block {
         let loop_iter_start = Instant::now();
+        
+        // Prefetch next batch if cache is low and we haven't reached end_block
+        let cached_blocks_ahead = prefetch_cache.keys().filter(|&&block_num| block_num > n).count();
+        
+        if cached_blocks_ahead < PREFETCH_SIZE && last_prefetched_block < end_block {
+            let prefetch_timing_start = Instant::now();
+            let prefetch_range_start = (last_prefetched_block + 1).max(n);
+            let prefetch_range_end = (prefetch_range_start + PREFETCH_SIZE as u64 - 1).min(end_block);
+            
+            if prefetch_range_start <= prefetch_range_end {
+                let prefetch_blocks: Vec<u64> = (prefetch_range_start..=prefetch_range_end)
+                    .filter(|&block_num| {
+                        !prefetch_cache.contains_key(&block_num) 
+                            && db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
+                    })
+                    .collect();
+                
+                if !prefetch_blocks.is_empty() {
+                    debug!("Prefetching {} blocks ({} to {})", 
+                        prefetch_blocks.len(), 
+                        prefetch_blocks[0], 
+                        prefetch_blocks.last().unwrap()
+                    );
+                    
+                    match fetch_block_traces_batch(&prefetch_blocks, &db, &endpoint) {
+                        std::result::Result::Ok(batch_results) => {
+                            let prefetched_count = batch_results.len() as u64;
+                            total_blocks_prefetched += prefetched_count;
+                            prefetch_cache.extend(batch_results);
+                            last_prefetched_block = prefetch_blocks.last().copied().unwrap_or(last_prefetched_block);
+                            
+                            let prefetch_time = prefetch_timing_start.elapsed();
+                            total_prefetch_time += prefetch_time;
+                            debug!("Prefetched {} blocks in {:.2}ms ({:.2}ms per block)", 
+                                prefetched_count,
+                                prefetch_time.as_secs_f64() * 1000.0,
+                                prefetch_time.as_secs_f64() * 1000.0 / prefetched_count as f64
+                            );
+                        }
+                        std::result::Result::Err(_) => {
+                            warn!("Failed to prefetch blocks, will fetch individually if needed");
+                        }
+                    }
+                } else {
+                    last_prefetched_block = prefetch_range_end;
+                }
+            }
+        }
         
         let status_check_start = Instant::now();
         let status = db.get_block_status(n)?;
@@ -496,12 +646,24 @@ pub fn live_run(
         
         if skip_successful && already_succeeded {
             debug!("Skipping block {n}, already succeeded");
+            prefetch_cache.remove(&n);
             total_overhead_time += loop_iter_start.elapsed();
             continue;
         }
         
         let block_start = Instant::now();
-        let block_result = run_block_with_retries(
+        let block_traces = match prefetch_cache.remove(&n) {
+            Some(traces) => {
+                prefetch_hits += 1;
+                traces
+            }
+            None => {
+                prefetch_misses += 1;
+                fetch_block_traces(n, &db, &endpoint)?
+            }
+        };
+        
+        let block_result = run_block_with_prefetch(
             n,
             &db,
             &endpoint,
@@ -512,6 +674,7 @@ pub fn live_run(
             gpu_state,
             only_forward,
             profile.clone(),
+            block_traces,
         );
         let block_time = block_start.elapsed();
         
@@ -540,7 +703,8 @@ pub fn live_run(
     let total_overhead_other = total_time
         .saturating_sub(init_time)
         .saturating_sub(total_block_time)
-        .saturating_sub(total_overhead_time);
+        .saturating_sub(total_overhead_time)
+        .saturating_sub(total_prefetch_time);
     
     info!("=== Live Run Completed ===");
     info!("Blocks in range: {} ({} to {})", blocks_in_range as u64, start_block, end_block);
@@ -554,6 +718,13 @@ pub fn live_run(
         info!("  Block execution:      {:6.2}ms ({:5.1}%)", total_block_time.as_secs_f64() * 1000.0, total_block_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
         info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", total_overhead_time.as_secs_f64() * 1000.0, total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
         info!("    (status checks, loop, webhooks)");
+        if total_prefetch_time.as_secs_f64() > 0.0 {
+            info!("  Prefetching:          {:6.2}ms ({:5.1}%)", total_prefetch_time.as_secs_f64() * 1000.0, total_prefetch_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+            info!("    Blocks prefetched: {} (avg {:.2}ms per block)", 
+                total_blocks_prefetched,
+                total_prefetch_time.as_secs_f64() * 1000.0 / total_blocks_prefetched.max(1) as f64
+            );
+        }
     }
     info!("  Other overhead:      {:6.2}ms ({:5.1}%)", total_overhead_other.as_secs_f64() * 1000.0, total_overhead_other.as_secs_f64() / total_time.as_secs_f64() * 100.0);
     info!("  Total:               {:6.2}ms ({:5.1}%)", total_time.as_secs_f64() * 1000.0, 100.0);
@@ -565,6 +736,13 @@ pub fn live_run(
         info!("  Execution time:      {:.2}ms", avg_time_per_block * 1000.0);
         info!("  Total time (w/ overhead): {:.2}ms", avg_total_per_block * 1000.0);
         info!("  Blocks per second:   {:.2}", blocks_actually_processed as f64 / total_time.as_secs_f64());
+        if prefetch_hits + prefetch_misses > 0 {
+            let prefetch_hit_rate = prefetch_hits as f64 / (prefetch_hits + prefetch_misses) as f64 * 100.0;
+            info!("=== Prefetch Statistics ===");
+            info!("  Prefetch hits:       {} ({:.1}%)", prefetch_hits, prefetch_hit_rate);
+            info!("  Prefetch misses:     {} ({:.1}%)", prefetch_misses, 100.0 - prefetch_hit_rate);
+            info!("  Total blocks prefetched: {}", total_blocks_prefetched);
+        }
     }
     info!("==========================");
     
