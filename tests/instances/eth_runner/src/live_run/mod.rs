@@ -78,6 +78,7 @@ fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result
         .context(format!("Failed to fetch block hashes in batch"))?;
     
     // Save all hashes to DB
+    let blocks_count = blocks_to_fetch.len();
     for block_num in blocks_to_fetch {
         if let Some(hash) = hashes.get(&block_num) {
             db.set_block_hash(block_num, U256::from_be_bytes(hash.0))?;
@@ -86,6 +87,12 @@ fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result
             return Err(anyhow!("Missing hash for block {block_num} in batched response"));
         }
     }
+    
+    // Flush all block hash writes after batching
+    let flush_start = Instant::now();
+    db.flush()?;
+    let flush_time = flush_start.elapsed();
+    debug!("Flushed {} block hashes in {:.2}ms", blocks_count, flush_time.as_secs_f64() * 1000.0);
     
     Ok(())
 }
@@ -283,6 +290,8 @@ fn run_block_with_prefetch(
     if calls_unsupported_precompile {
         // Here it makes little sense to run the block, as the post check is gonna fail
         // We just skip it, marking it as successful
+        // Flush the hash write before returning
+        db.flush()?;
         warn!("Skipping block {block_number}, as it calls to an unsupported precompile");
         return Ok(BlockStatus::Success);
     }
@@ -435,6 +444,11 @@ fn run_block_with_prefetch(
         .collect();
 
     db.set_block_resource_infos(block_number, resource_infos)?;
+    
+    // Flush once after all writes are batched
+    let flush_start = Instant::now();
+    db.flush()?;
+    let flush_time = flush_start.elapsed();
     let db_write_time = db_write_start.elapsed();
 
     let post_check_start = Instant::now();
@@ -454,22 +468,43 @@ fn run_block_with_prefetch(
     info!("  Execution:         {:6.2}ms ({:5.1}%)", execution_time.as_secs_f64() * 1000.0, execution_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
     info!("  Post-check:        {:6.2}ms ({:5.1}%)", post_check_time.as_secs_f64() * 1000.0, post_check_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
     info!("  DB writes:         {:6.2}ms ({:5.1}%)", db_write_time.as_secs_f64() * 1000.0, db_write_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    info!("    - Flush:         {:6.2}ms ({:5.1}% of DB writes)", flush_time.as_secs_f64() * 1000.0, flush_time.as_secs_f64() / db_write_time.as_secs_f64() * 100.0);
     info!("  Total:             {:6.2}ms", total_time.as_secs_f64() * 1000.0);
     info!("===================================");
 
     match post_check_result {
         core::result::Result::Ok(()) => {
+            let post_db_write_start = Instant::now();
             db.set_block_status(block_number, db::BlockStatus::Success)?;
             if persist_all {
                 db.set_block_traces(block_number, &traces_clone)?;
             }
+            // Flush status and traces writes
+            let post_flush_start = Instant::now();
+            db.flush()?;
+            let post_flush_time = post_flush_start.elapsed();
+            let post_db_write_time = post_db_write_start.elapsed();
+            debug!("Post-check DB writes: {:.2}ms (flush: {:.2}ms)", 
+                post_db_write_time.as_secs_f64() * 1000.0,
+                post_flush_time.as_secs_f64() * 1000.0
+            );
             Ok(db::BlockStatus::Success)
         }
         Err(e) => {
+            let post_db_write_start = Instant::now();
             db.set_block_status(block_number, db::BlockStatus::Error(e.clone()))?;
             // Always save of them for now, even when already cached.
             // TODO: avoid persisting when read from cache.
             db.set_block_traces(block_number, &traces_clone)?;
+            // Flush status and traces writes
+            let post_flush_start = Instant::now();
+            db.flush()?;
+            let post_flush_time = post_flush_start.elapsed();
+            let post_db_write_time = post_db_write_start.elapsed();
+            debug!("Post-check DB writes: {:.2}ms (flush: {:.2}ms)", 
+                post_db_write_time.as_secs_f64() * 1000.0,
+                post_flush_time.as_secs_f64() * 1000.0
+            );
             debug!("Saved block traces for block {block_number}");
             Ok(db::BlockStatus::Error(e))
         }
