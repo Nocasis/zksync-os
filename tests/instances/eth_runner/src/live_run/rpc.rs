@@ -249,25 +249,42 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
     
-    let read_start = Instant::now();
-    let mut raw_bytes = Vec::new();
-    response.into_reader().read_to_end(&mut raw_bytes)?;
-    let read_time = read_start.elapsed();
+    let mut reader = response.into_reader();
     
-    let raw_size = raw_bytes.len();
-    
-    // Decompress zstd if needed, otherwise use raw bytes as-is
+    // Stream decompression directly from HTTP response for better performance
+    // This avoids reading all compressed data into memory first
     let decompressed_bytes = if content_encoding.contains("zstd") {
+        let decompress_start = Instant::now();
         use zstd::stream::Decoder;
         use std::io::Read;
-        let mut decoder = Decoder::new(&raw_bytes[..])
+        
+        // Decompress directly from the HTTP stream reader
+        // This allows decompression to happen in parallel with network transfer
+        let mut decoder = Decoder::new(&mut reader)
             .context("Failed to create zstd decoder")?;
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed)
             .context("Failed to decompress zstd response")?;
+        let decompress_time = decompress_start.elapsed();
+        
+        // Estimate compressed size (we don't have it anymore since we streamed)
+        let estimated_compressed = (decompressed.len() as f64 * 0.1) as usize; // ~10% of decompressed
+        debug!("RPC decompression (streamed): {:.2}ms ({} bytes decompressed, ~{} bytes compressed)", 
+            decompress_time.as_secs_f64() * 1000.0,
+            decompressed.len(),
+            estimated_compressed
+        );
+        
         decompressed
     } else {
-        // Uncompressed - use raw bytes
+        let read_start = Instant::now();
+        let mut raw_bytes = Vec::new();
+        reader.read_to_end(&mut raw_bytes)?;
+        let read_time = read_start.elapsed();
+        debug!("RPC read: {:.2}ms ({} bytes)", 
+            read_time.as_secs_f64() * 1000.0,
+            raw_bytes.len()
+        );
         raw_bytes
     };
     
@@ -275,29 +292,13 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
         .context("Response is not valid UTF-8 after decompression")?;
     
     let response_size = out.len();
-    let space_saved = if response_size > 0 && raw_size < response_size {
-        (1.0 - raw_size as f64 / response_size as f64) * 100.0
-    } else {
-        0.0
-    };
     
-    if content_encoding.contains("zstd") {
-        debug!("RPC network: {:.2}ms (request: {} bytes, response: {} bytes decompressed from {} bytes compressed ({:.1}% space saved), encoding: zstd, read: {:.2}ms)",
-            network_time.as_secs_f64() * 1000.0,
-            request_size,
-            response_size,
-            raw_size,
-            space_saved,
-            read_time.as_secs_f64() * 1000.0
-        );
-    } else {
-        debug!("RPC network: {:.2}ms (request: {} bytes, response: {} bytes, encoding: none, read: {:.2}ms)",
-            network_time.as_secs_f64() * 1000.0,
-            request_size,
-            response_size,
-            read_time.as_secs_f64() * 1000.0
-        );
-    }
+    debug!("RPC network: {:.2}ms (request: {} bytes, response: {} bytes, encoding: {})",
+        network_time.as_secs_f64() * 1000.0,
+        request_size,
+        response_size,
+        content_encoding
+    );
     
     Ok(out)
 }
