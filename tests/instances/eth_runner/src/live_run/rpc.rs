@@ -251,28 +251,40 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     
     let mut reader = response.into_reader();
     
-    // Stream decompression directly from HTTP response for better performance
-    // This avoids reading all compressed data into memory first
+    // Read compressed data first, then decompress separately to measure actual CPU time
     let decompressed_bytes = if content_encoding.contains("zstd") {
-        let decompress_start = Instant::now();
-        use zstd::stream::Decoder;
         use std::io::Read;
         
-        // Decompress directly from the HTTP stream reader
-        // This allows decompression to happen in parallel with network transfer
-        let mut decoder = Decoder::new(&mut reader)
+        // Read compressed data from network (this is the slow part)
+        let read_start = Instant::now();
+        let mut compressed_bytes = Vec::new();
+        reader.read_to_end(&mut compressed_bytes)?;
+        let read_time = read_start.elapsed();
+        let compressed_size = compressed_bytes.len();
+        
+        // Now decompress (this is the fast CPU part)
+        let decompress_start = Instant::now();
+        use zstd::stream::Decoder;
+        let mut decoder = Decoder::new(&compressed_bytes[..])
             .context("Failed to create zstd decoder")?;
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed)
             .context("Failed to decompress zstd response")?;
         let decompress_time = decompress_start.elapsed();
         
-        // Estimate compressed size (we don't have it anymore since we streamed)
-        let estimated_compressed = (decompressed.len() as f64 * 0.1) as usize; // ~10% of decompressed
-        debug!("RPC decompression (streamed): {:.2}ms ({} bytes decompressed, ~{} bytes compressed)", 
+        let space_saved = if decompressed.len() > 0 {
+            (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        debug!("RPC zstd: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
+            read_time.as_secs_f64() * 1000.0,
+            compressed_size,
             decompress_time.as_secs_f64() * 1000.0,
             decompressed.len(),
-            estimated_compressed
+            space_saved,
+            (read_time + decompress_time).as_secs_f64() * 1000.0
         );
         
         decompressed
