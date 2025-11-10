@@ -23,7 +23,7 @@ use std::panic;
 
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
-const PREFETCH_SIZE: usize = 8; // Prefetch 8 blocks ahead (8 * 5 = 40 RPC calls, under 50 req/s limit)
+const PREFETCH_SIZE: usize = 8; // Prefetch 8 blocks ahead (8 * 5 = 40 RPC calls, under 50 req/s limit) // TODO: adjust this value
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
@@ -621,24 +621,21 @@ pub fn live_run(
     let mut total_blocks_prefetched = 0u64;
     
     let mut prefetch_cache = std::collections::HashMap::<u64, BlockTraces>::new();
-    let mut last_prefetched_block = start_block.saturating_sub(1);
+    let mut next_block_to_prefetch = start_block;
     
     for n in start_block..=end_block {
         let loop_iter_start = Instant::now();
         
-        // Prefetch next batch if cache is low and we haven't reached end_block
-        let cached_blocks_ahead = prefetch_cache.keys().filter(|&&block_num| block_num > n).count();
-        
-        if cached_blocks_ahead < PREFETCH_SIZE && last_prefetched_block < end_block {
+        // Prefetch next batch if cache is empty and we haven't reached end_block
+        // This implements batch-based prefetching: prefetch 8 blocks, execute them, then prefetch next batch
+        if prefetch_cache.is_empty() && next_block_to_prefetch <= end_block {
             let prefetch_timing_start = Instant::now();
-            let prefetch_range_start = (last_prefetched_block + 1).max(n);
-            let prefetch_range_end = (prefetch_range_start + PREFETCH_SIZE as u64 - 1).min(end_block);
+            let prefetch_range_end = (next_block_to_prefetch + PREFETCH_SIZE as u64 - 1).min(end_block);
             
-            if prefetch_range_start <= prefetch_range_end {
-                let prefetch_blocks: Vec<u64> = (prefetch_range_start..=prefetch_range_end)
+            if next_block_to_prefetch <= prefetch_range_end {
+                let prefetch_blocks: Vec<u64> = (next_block_to_prefetch..=prefetch_range_end)
                     .filter(|&block_num| {
-                        !prefetch_cache.contains_key(&block_num) 
-                            && db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
+                        db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
                     })
                     .collect();
                 
@@ -654,7 +651,7 @@ pub fn live_run(
                             let prefetched_count = batch_results.len() as u64;
                             total_blocks_prefetched += prefetched_count;
                             prefetch_cache.extend(batch_results);
-                            last_prefetched_block = prefetch_blocks.last().copied().unwrap_or(last_prefetched_block);
+                            next_block_to_prefetch = prefetch_blocks.last().copied().unwrap_or(next_block_to_prefetch) + 1;
                             
                             let prefetch_time = prefetch_timing_start.elapsed();
                             total_prefetch_time += prefetch_time;
@@ -666,10 +663,13 @@ pub fn live_run(
                         }
                         std::result::Result::Err(_) => {
                             warn!("Failed to prefetch blocks, will fetch individually if needed");
+                            // On error, skip to next block to avoid infinite loop
+                            next_block_to_prefetch += 1;
                         }
                     }
                 } else {
-                    last_prefetched_block = prefetch_range_end;
+                    // All blocks in range are already in DB, skip to next batch
+                    next_block_to_prefetch = prefetch_range_end + 1;
                 }
             }
         }
