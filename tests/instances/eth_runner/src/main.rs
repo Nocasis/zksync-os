@@ -90,7 +90,8 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     rig::init_logger();
     let cli = Cli::parse();
     match cli.command {
@@ -135,7 +136,8 @@ fn main() -> anyhow::Result<()> {
             single_tx,
             only_forward,
             profile,
-        ),
+        )
+        .await,
         Command::ExportRatios { db, path } => live_run::export_block_ratios(db, path),
         Command::ShowStatus { db } => live_run::show_status(db),
     }

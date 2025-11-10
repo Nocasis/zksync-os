@@ -8,8 +8,9 @@ use alloy::primitives::B256;
 use anyhow::{anyhow, Context};
 use anyhow::Result;
 use rig::log::{debug, warn};
+use serde_json::json;
 use std::{io::Read, str::FromStr};
-use ureq::json;
+use reqwest::Client;
 
 /// Converts u64 to hex string with "0x" prefix.
 fn to_hex(n: u64) -> String {
@@ -17,7 +18,7 @@ fn to_hex(n: u64) -> String {
 }
 
 /// Fetches the full block data with transactions.
-pub fn get_block(endpoint: &str, block_number: u64) -> Result<Block> {
+pub async fn get_block(endpoint: &str, block_number: u64) -> Result<Block> {
     debug!("RPC: get_block({block_number})");
     let body = json!({
         "method": "eth_getBlockByNumber",
@@ -25,13 +26,13 @@ pub fn get_block(endpoint: &str, block_number: u64) -> Result<Block> {
         "id": 1,
         "jsonrpc": "2.0"
     });
-    let res = send(endpoint, body)?;
+    let res = send(endpoint, body).await?;
     let block = serde_json::from_str(&res)?;
     Ok(block)
 }
 
 /// Fetches the block hash.
-pub fn get_block_hash(endpoint: &str, block_number: u64) -> Result<B256> {
+pub async fn get_block_hash(endpoint: &str, block_number: u64) -> Result<B256> {
     debug!("RPC: get_block_hash({block_number})");
 
     let body = json!({
@@ -40,7 +41,7 @@ pub fn get_block_hash(endpoint: &str, block_number: u64) -> Result<B256> {
         "id": 1,
         "jsonrpc": "2.0"
     });
-    let res = send(endpoint, body)?;
+    let res = send(endpoint, body).await?;
     let res: serde_json::Value = serde_json::from_str(&res)?;
     let hash_hex = res["result"]["hash"]
         .as_str()
@@ -52,7 +53,7 @@ pub fn get_block_hash(endpoint: &str, block_number: u64) -> Result<B256> {
 /// Fetches multiple block hashes in batched RPC calls.
 /// Chunks requests into batches of 50 to respect rate limits.
 /// Returns a HashMap mapping block_number -> B256 hash.
-pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<std::collections::HashMap<u64, B256>> {
+pub async fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<std::collections::HashMap<u64, B256>> {
     if block_numbers.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
@@ -81,7 +82,7 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
             })
             .collect();
         
-        let response = send(endpoint, json!(batch))?;
+        let response = send(endpoint, json!(batch)).await?;
         
         // Parse the batched response (array of responses)
         let response_value: serde_json::Value = serde_json::from_str(&response)
@@ -136,9 +137,7 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
         // Only sleep if there are more chunks to process
         if chunk_idx < chunks.len() - 1 {
             // Wait 1.5 seconds before next batch to respect 50 req/s limit
-            use std::thread;
-            use std::time::Duration;
-            thread::sleep(Duration::from_millis(1500)); // TODO Adjust this to be more accurate
+            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await; // TODO Adjust this to be more accurate
         }
     }
     
@@ -146,7 +145,7 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
 }
 
 /// Fetches the block receipts.
-pub fn get_receipts(endpoint: &str, block_number: u64) -> Result<BlockReceipts> {
+pub async fn get_receipts(endpoint: &str, block_number: u64) -> Result<BlockReceipts> {
     debug!("RPC: get_receipts({block_number})");
     let body = json!({
         "method": "eth_getBlockReceipts",
@@ -154,13 +153,13 @@ pub fn get_receipts(endpoint: &str, block_number: u64) -> Result<BlockReceipts> 
         "id": 1,
         "jsonrpc": "2.0"
     });
-    let res = send(endpoint, body)?;
+    let res = send(endpoint, body).await?;
     let v = serde_json::from_str(&res)?;
     Ok(v)
 }
 
 /// Fetches the prestate trace.
-pub fn get_prestate(endpoint: &str, block_number: u64) -> Result<PrestateTrace> {
+pub async fn get_prestate(endpoint: &str, block_number: u64) -> Result<PrestateTrace> {
     debug!("RPC: get_prestate({block_number})");
     let body = json!({
         "method": "debug_traceBlockByNumber",
@@ -168,13 +167,13 @@ pub fn get_prestate(endpoint: &str, block_number: u64) -> Result<PrestateTrace> 
         "id": 1,
         "jsonrpc": "2.0"
     });
-    let res = send(endpoint, body)?;
+    let res = send(endpoint, body).await?;
     let v = serde_json::from_str(&res)?;
     Ok(v)
 }
 
 /// Fetches the diff trace.
-pub fn get_difftrace(endpoint: &str, block_number: u64) -> Result<DiffTrace> {
+pub async fn get_difftrace(endpoint: &str, block_number: u64) -> Result<DiffTrace> {
     debug!("RPC: get_difftrace({block_number})");
     let body = json!({
         "method": "debug_traceBlockByNumber",
@@ -185,12 +184,12 @@ pub fn get_difftrace(endpoint: &str, block_number: u64) -> Result<DiffTrace> {
         "id": 1,
         "jsonrpc": "2.0"
     });
-    let res = send(endpoint, body)?;
+    let res = send(endpoint, body).await?;
     let v = serde_json::from_str(&res)?;
     Ok(v)
 }
 
-pub fn get_calltrace(endpoint: &str, block_number: u64) -> Result<CallTrace> {
+pub async fn get_calltrace(endpoint: &str, block_number: u64) -> Result<CallTrace> {
     debug!("RPC: get_calltrace({block_number})");
     use serde::Deserialize;
     use serde_json::Deserializer;
@@ -203,7 +202,7 @@ pub fn get_calltrace(endpoint: &str, block_number: u64) -> Result<CallTrace> {
         "id": 1,
         "jsonrpc": "2.0"
     });
-    let res = send(endpoint, body)?;
+    let res = send(endpoint, body).await?;
 
     let mut de = Deserializer::from_str(&res);
     de.disable_recursion_limit();
@@ -212,7 +211,7 @@ pub fn get_calltrace(endpoint: &str, block_number: u64) -> Result<CallTrace> {
     Ok(calltrace)
 }
 
-pub fn get_chain_id(endpoint: &str) -> Result<u64> {
+pub async fn get_chain_id(endpoint: &str) -> Result<u64> {
     debug!("RPC: eth_chainId()");
     use serde::Deserialize;
     use serde_json::Deserializer;
@@ -223,7 +222,7 @@ pub fn get_chain_id(endpoint: &str) -> Result<u64> {
         "id": 1,
         "jsonrpc": "2.0"
     });
-    let res = send(endpoint, body)?;
+    let res = send(endpoint, body).await?;
     let res: serde_json::Value = serde_json::from_str(&res)?;
     let s = res["result"].as_str().unwrap();
     let hex = s.trim_start_matches("0x");
@@ -232,37 +231,74 @@ pub fn get_chain_id(endpoint: &str) -> Result<u64> {
     Ok(id)
 }
 
-fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
+async fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     use std::time::Instant;
     
     let request_size = serde_json::to_string(&body)?.len();
     let network_start = Instant::now();
     
-    let response = ureq::post(endpoint)
-        .set("Content-Type", "application/json")
-        .set("Accept-Encoding", "zstd")
-        .send_json(body)?;
+    // Send zstd and gzip - server will choose what it supports
+    let accept_encoding = "zstd, gzip";
+    
+    // Create reqwest async client - supports HTTP/2
+    let client = Client::new();
+    let body_str = serde_json::to_string(&body)?;
+    let response = client
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("Accept-Encoding", accept_encoding)
+        .body(body_str)
+        .send()
+        .await?;
     
     let network_time = network_start.elapsed();
     
-    let content_encoding = response.header("Content-Encoding")
+    // Debug: print all response headers
+    debug!("RPC request headers: Accept-Encoding={}, endpoint={}", accept_encoding, endpoint);
+    let mut all_headers = Vec::new();
+    for (name, value) in response.headers() {
+        all_headers.push(format!("{}: {}", name, value.to_str().unwrap_or("<invalid>")));
+    }
+    debug!("RPC response headers: {}", all_headers.join(", "));
+    
+    // Check HTTP version
+    let http_version = format!("{:?}", response.version());
+    debug!("RPC HTTP version: {}", http_version);
+    
+    let content_encoding = response.headers()
+        .get("Content-Encoding")
+        .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
+    debug!("RPC Content-Encoding header: '{}'", content_encoding);
     
-    let mut reader = response.into_reader();
+    // Check if Content-Encoding header exists but might be in different case
+    let content_encoding_lower = response.headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    if content_encoding_lower != "none" && content_encoding == "none" {
+        debug!("RPC Content-Encoding found with lowercase: '{}'", content_encoding_lower);
+    }
     
-    // Read compressed data first, then decompress separately to measure actual CPU time
+    // Handle decompression based on Content-Encoding header
+    // Note: reqwest auto-decompresses gzip by default, but we need to handle zstd manually
+    let read_start = Instant::now();
+    
+    // Read response bytes - reqwest will auto-decompress gzip, but not zstd
+    let raw_bytes = response.bytes().await?.to_vec();
+    let raw_size = raw_bytes.len();
+    
+    debug!("RPC raw response: {} bytes, Content-Encoding: '{}'", 
+        raw_size, content_encoding
+    );
+    
     let decompressed_bytes = if content_encoding.contains("zstd") {
-        use std::io::Read;
-        
-        // Read compressed data from network (this is the slow part)
-        let read_start = Instant::now();
-        let mut compressed_bytes = Vec::new();
-        reader.read_to_end(&mut compressed_bytes)?;
-        let read_time = read_start.elapsed();
+        // zstd is not automatically decompressed by reqwest, handle it manually
+        let compressed_bytes = raw_bytes;
         let compressed_size = compressed_bytes.len();
         
-        // Now decompress (this is the fast CPU part)
         let decompress_start = Instant::now();
         use zstd::stream::Decoder;
         let mut decoder = Decoder::new(&compressed_bytes[..])
@@ -279,29 +315,60 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
         };
         
         debug!("RPC zstd: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
-            read_time.as_secs_f64() * 1000.0,
+            read_start.elapsed().as_secs_f64() * 1000.0,
             compressed_size,
             decompress_time.as_secs_f64() * 1000.0,
             decompressed.len(),
             space_saved,
-            (read_time + decompress_time).as_secs_f64() * 1000.0
+            (read_start.elapsed() + decompress_time).as_secs_f64() * 1000.0
+        );
+        
+        decompressed
+    } else if content_encoding.contains("gzip") {
+        // gzip needs manual decompression - reqwest doesn't auto-decompress in blocking mode
+        let compressed_bytes = raw_bytes;
+        let compressed_size = compressed_bytes.len();
+        
+        // Decompress gzip
+        let decompress_start = Instant::now();
+        use flate2::read::GzDecoder;
+        let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)
+            .context("Failed to decompress gzip response")?;
+        let decompress_time = decompress_start.elapsed();
+        
+        let space_saved = if decompressed.len() > 0 {
+            (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        debug!("RPC gzip: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
+            read_start.elapsed().as_secs_f64() * 1000.0,
+            compressed_size,
+            decompress_time.as_secs_f64() * 1000.0,
+            decompressed.len(),
+            space_saved,
+            (read_start.elapsed() + decompress_time).as_secs_f64() * 1000.0
         );
         
         decompressed
     } else {
-        let read_start = Instant::now();
-        let mut raw_bytes = Vec::new();
-        reader.read_to_end(&mut raw_bytes)?;
+        // No compression - use raw bytes as-is
+        let decompressed = raw_bytes;
         let read_time = read_start.elapsed();
-        debug!("RPC read: {:.2}ms ({} bytes)", 
+        
+        debug!("RPC read: {:.2}ms ({} bytes, uncompressed)", 
             read_time.as_secs_f64() * 1000.0,
-            raw_bytes.len()
+            decompressed.len()
         );
-        raw_bytes
+        
+        decompressed
     };
     
     let out = String::from_utf8(decompressed_bytes)
-        .context("Response is not valid UTF-8 after decompression")?;
+        .context("Response is not valid UTF-8")?;
     
     let response_size = out.len();
     
@@ -318,7 +385,7 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
 /// Fetches all block traces in a single batched RPC call.
 /// This is much faster than making 5 separate HTTP requests.
 /// TODO: maybe we can reduce amount of RPC calls using https://www.quicknode.com/docs/ethereum/qn_getBlockWithReceipts
-pub fn get_all_block_traces(
+pub async fn get_all_block_traces(
     endpoint: &str,
     block_number: u64,
 ) -> Result<(Block, PrestateTrace, DiffTrace, BlockReceipts, CallTrace)> {
@@ -365,7 +432,7 @@ pub fn get_all_block_traces(
         }
     ]);
     
-    let response = send(endpoint, batch)?;
+    let response = send(endpoint, batch).await?;
     
     // Parse the batched response - it should be an array of response objects
     let response_value: serde_json::Value = serde_json::from_str(&response)
@@ -470,7 +537,7 @@ pub fn get_all_block_traces(
 /// This is much faster than fetching blocks one at a time.
 /// Returns a HashMap mapping block_number -> (Block, PrestateTrace, DiffTrace, BlockReceipts, CallTrace).
 /// Only includes successfully fetched blocks in the result.
-pub fn get_all_block_traces_batch(
+pub async fn get_all_block_traces_batch(
     endpoint: &str,
     block_numbers: &[u64],
 ) -> Result<std::collections::HashMap<u64, (Block, PrestateTrace, DiffTrace, BlockReceipts, CallTrace)>> {
@@ -529,7 +596,7 @@ pub fn get_all_block_traces_batch(
         }));
     }
     
-    let response = send(endpoint, json!(batch))?;
+    let response = send(endpoint, json!(batch)).await?;
     
     // Parse the batched response
     let parse_start = std::time::Instant::now();

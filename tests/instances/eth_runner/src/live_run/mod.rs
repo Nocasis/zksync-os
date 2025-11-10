@@ -16,7 +16,7 @@ use crate::{
     prestate::{DiffTrace, PrestateTrace},
     receipts::TransactionReceipt,
 };
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde_json::json;
 use std::backtrace::Backtrace;
 use std::panic;
@@ -25,11 +25,12 @@ const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
 const PREFETCH_SIZE: usize = 8; // Prefetch 8 blocks ahead (8 * 5 = 40 RPC calls, under 50 req/s limit) // TODO: adjust this value
 
-fn send_slack(webhook: &str, text: &str) -> Result<()> {
+async fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
         .post(webhook)
         .json(&serde_json::json!({ "text": text }))
-        .send()?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
         return Err(anyhow!("slack webhook returned {}", resp.status()));
     }
@@ -53,7 +54,7 @@ fn install_panic_hook(webhook: String) {
 // Fetches hashes for the N_PREV_BLOCKS previous to [start_block].
 // Persists them in DB.
 // Uses batched RPC call to fetch all missing hashes in a single request.
-fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result<()> {
+async fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result<()> {
     let first = start_block.saturating_sub(N_PREV_BLOCKS as u64);
     
     // Collect all block numbers that need to be fetched
@@ -75,6 +76,7 @@ fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result
     
     // Fetch all missing hashes in a single batched RPC call
     let hashes = rpc::get_block_hashes_batch(endpoint, &blocks_to_fetch)
+        .await
         .context(format!("Failed to fetch block hashes in batch"))?;
     
     // Save all hashes to DB
@@ -116,7 +118,7 @@ fn get_block_hashes_array(block_number: u64, db: &Database) -> Result<[U256; N_P
 }
 
 // Does not persist the traces.
-fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Result<BlockTraces> {
+async fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Result<BlockTraces> {
     match db.get_block_traces(block_number)? {
         Some(traces) => {
             debug!("Block traces for {block_number} already in DB, skipping");
@@ -127,6 +129,7 @@ fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Resul
             
             // Use batched RPC call - single HTTP request instead of 5
             let (block, prestate, diff, receipts, call) = rpc::get_all_block_traces(endpoint, block_number)
+                .await
                 .context(format!("Failed to fetch block traces for {block_number}"))?;
             
             let total_rpc_time = rpc_start.elapsed();
@@ -151,7 +154,7 @@ fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Resul
 /// Fetches block traces for multiple blocks in a single batched HTTP request.
 /// Returns a HashMap mapping block_number -> BlockTraces.
 /// Blocks already in DB are skipped and returned from cache.
-fn fetch_block_traces_batch(
+async fn fetch_block_traces_batch(
     block_numbers: &[u64],
     db: &Database,
     endpoint: &str,
@@ -184,6 +187,7 @@ fn fetch_block_traces_batch(
     
     let rpc_start = Instant::now();
     let batch_results = rpc::get_all_block_traces_batch(endpoint, &blocks_to_fetch)
+        .await
         .context("Failed to fetch block traces in batch")?;
     let rpc_time = rpc_start.elapsed();
     
@@ -223,7 +227,7 @@ type GpuSharedState<'a> = rig::cli_lib::prover_utils::GpuSharedState<'a>;
 type GpuSharedState = ();
 
 #[allow(clippy::too_many_arguments, unused_variables)]
-fn run_block(
+async fn run_block(
     block_number: u64,
     db: &Database,
     endpoint: &str,
@@ -235,7 +239,7 @@ fn run_block(
     only_forward: bool,
     profile: Option<String>,
 ) -> Result<BlockStatus> {
-    let block_traces = fetch_block_traces(block_number, db, endpoint)?;
+    let block_traces = fetch_block_traces(block_number, db, endpoint).await?;
     run_block_with_prefetch(
         block_number,
         db,
@@ -249,11 +253,12 @@ fn run_block(
         profile,
         block_traces,
     )
+    .await
 }
 
 /// Runs a block using prefetched traces.
 #[allow(clippy::too_many_arguments, unused_variables)]
-fn run_block_with_prefetch(
+async fn run_block_with_prefetch(
     block_number: u64,
     db: &Database,
     endpoint: &str,
@@ -512,7 +517,7 @@ fn run_block_with_prefetch(
 }
 
 #[allow(clippy::too_many_arguments, unused_variables)]
-fn run_block_with_retries(
+async fn run_block_with_retries(
     block_number: u64,
     db: &Database,
     endpoint: &str,
@@ -538,7 +543,9 @@ fn run_block_with_retries(
             gpu_shared_state,
             only_forward,
             profile.clone(), // Clone to avoid moving on first attempt
-        ) {
+        )
+        .await
+        {
             core::result::Result::Ok(BlockStatus::Success) => return Ok(BlockStatus::Success),
             e if attempt < MAX_RETRIES => {
                 warn!(
@@ -559,7 +566,7 @@ fn run_block_with_retries(
 /// Run blocks from [start_block] to [end_block].
 ///
 #[allow(clippy::too_many_arguments)]
-pub fn live_run(
+pub async fn live_run(
     start_block: u64,
     end_block: u64,
     endpoint: String,
@@ -581,8 +588,8 @@ pub fn live_run(
     let init_start = Instant::now();
     let db = Database::init(db_path)?;
     assert!(start_block <= end_block);
-    fetch_block_hashes(start_block, &db, &endpoint)?;
-    let chain_id = rpc::get_chain_id(&endpoint)?;
+    fetch_block_hashes(start_block, &db, &endpoint).await?;
+    let chain_id = rpc::get_chain_id(&endpoint).await?;
     let init_time = init_start.elapsed();
     let mut failures = 0;
     
@@ -646,7 +653,7 @@ pub fn live_run(
                         prefetch_blocks.last().unwrap()
                     );
                     
-                    match fetch_block_traces_batch(&prefetch_blocks, &db, &endpoint) {
+                    match fetch_block_traces_batch(&prefetch_blocks, &db, &endpoint).await {
                         std::result::Result::Ok(batch_results) => {
                             let prefetched_count = batch_results.len() as u64;
                             total_blocks_prefetched += prefetched_count;
@@ -694,7 +701,7 @@ pub fn live_run(
             }
             None => {
                 prefetch_misses += 1;
-                fetch_block_traces(n, &db, &endpoint)?
+                fetch_block_traces(n, &db, &endpoint).await?
             }
         };
         
@@ -710,16 +717,19 @@ pub fn live_run(
             only_forward,
             profile.clone(),
             block_traces,
-        );
+        )
+        .await;
         let block_time = block_start.elapsed();
         
         if let BlockStatus::Error(e) = block_result? {
             failures += 1;
             let webhook_start = Instant::now();
+            let msg = format!(":rotating_light: eth_runner: Block {n} on chain with id {chain_id} failed with: {e:?}");
             if let Some(webhook) = webhook.as_ref() {
-                let msg = format!(":rotating_light: eth_runner: Block {n} on chain with id {chain_id} failed with: {e:?}");
-                send_slack(webhook, &msg)?
+                send_slack(webhook, &msg).await?
             }
+            debug!("Received error, msg: {msg}");
+            
             total_overhead_time += webhook_start.elapsed();
             
             if failures == MAX_FAILURES {
@@ -783,7 +793,7 @@ pub fn live_run(
     
     if let Some(webhook) = webhook.as_ref() {
         let msg = format!(":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!");
-        send_slack(webhook, &msg)?
+        send_slack(webhook, &msg).await?
     }
     Ok(())
 }
