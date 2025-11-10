@@ -240,7 +240,7 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     
     let response = ureq::post(endpoint)
         .set("Content-Type", "application/json")
-        .set("Accept-Encoding", "zstd")
+        .set("Accept-Encoding", "zstd, gzip")
         .send_json(body)?;
     
     let network_time = network_start.elapsed();
@@ -250,16 +250,22 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
         .unwrap_or_else(|| "none".to_string());
     
     let mut reader = response.into_reader();
+    use std::io::Read;
     
-    // Read compressed data first, then decompress separately to measure actual CPU time
+    // Read raw bytes first, then decompress separately to measure actual CPU time
+    // Support both zstd (for QuickNode) and gzip (for Alchemy)
+    let read_start = Instant::now();
+    let mut raw_bytes = Vec::new();
+    reader.read_to_end(&mut raw_bytes)?;
+    let read_time = read_start.elapsed();
+    let raw_size = raw_bytes.len();
+    
+    debug!("RPC raw response: {} bytes, Content-Encoding: '{}'", 
+        raw_size, content_encoding
+    );
+    
     let decompressed_bytes = if content_encoding.contains("zstd") {
-        use std::io::Read;
-        
-        // Read compressed data from network (this is the slow part)
-        let read_start = Instant::now();
-        let mut compressed_bytes = Vec::new();
-        reader.read_to_end(&mut compressed_bytes)?;
-        let read_time = read_start.elapsed();
+        let compressed_bytes = raw_bytes;
         let compressed_size = compressed_bytes.len();
         
         // Now decompress (this is the fast CPU part)
@@ -288,12 +294,39 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
         );
         
         decompressed
+    } else if content_encoding.contains("gzip") {
+        // Read compressed data from network (already read above)
+        let compressed_bytes = raw_bytes;
+        let compressed_size = compressed_bytes.len();
+        
+        // Decompress gzip
+        let decompress_start = Instant::now();
+        use flate2::read::GzDecoder;
+        let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)
+            .context("Failed to decompress gzip response")?;
+        let decompress_time = decompress_start.elapsed();
+        
+        let space_saved = if decompressed.len() > 0 {
+            (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        debug!("RPC gzip: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
+            read_time.as_secs_f64() * 1000.0,
+            compressed_size,
+            decompress_time.as_secs_f64() * 1000.0,
+            decompressed.len(),
+            space_saved,
+            (read_time + decompress_time).as_secs_f64() * 1000.0
+        );
+        
+        decompressed
     } else {
-        let read_start = Instant::now();
-        let mut raw_bytes = Vec::new();
-        reader.read_to_end(&mut raw_bytes)?;
-        let read_time = read_start.elapsed();
-        debug!("RPC read: {:.2}ms ({} bytes)", 
+        // No compression - use raw bytes (already read above)
+        debug!("RPC read: {:.2}ms ({} bytes, uncompressed)", 
             read_time.as_secs_f64() * 1000.0,
             raw_bytes.len()
         );
