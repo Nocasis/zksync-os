@@ -64,8 +64,12 @@ for log_file in "${LOG_FILES[@]}"; do
     echo "Process $PROCESS_NUM ($STATUS):"
     
     # Extract key metrics
+    # Note: Log lines have format: [timestamp INFO module] message
     BLOCKS_PROCESSED=$(grep "Blocks actually processed:" "$log_file" | tail -1 | awk '{print $NF}')
-    TOTAL_TIME_MS=$(grep "^  Total:" "$log_file" | tail -1 | awk '{print $2}' | sed 's/ms//')
+    # Total line format: "[timestamp INFO module]   Total:              367939.81ms (100.0%)"
+    # Need to extract the number before "ms" - it's the last field before the percentage
+    TOTAL_TIME_MS=$(grep "  Total:" "$log_file" | tail -1 | grep -oE '[0-9]+\.[0-9]+ms' | sed 's/ms//')
+    # Blocks per second line format: "[timestamp INFO module]   Blocks per second:  0.27"
     BPS=$(grep "Blocks per second:" "$log_file" | tail -1 | awk '{print $NF}')
     
     if [ ! -z "$BLOCKS_PROCESSED" ] && [ "$BLOCKS_PROCESSED" != "0" ]; then
