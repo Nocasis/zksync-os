@@ -620,6 +620,7 @@ pub fn live_run(
     let mut total_block_time = std::time::Duration::ZERO; // Sum of all block execution times (for averages)
     let mut total_parallel_execution_time = std::time::Duration::ZERO; // Actual wall-clock time for parallel execution (includes batch prep)
     let mut total_batch_prep_time = std::time::Duration::ZERO; // Time spent preparing batches (status checks, fetching missing traces)
+    let mut total_hash_wait_time = std::time::Duration::ZERO; // Time spent waiting for previous block's hash
     let mut total_overhead_time = std::time::Duration::ZERO; // Per-block overhead (webhooks, etc.)
     let mut total_prefetch_time = std::time::Duration::ZERO;
     let mut blocks_actually_processed = 0u64;
@@ -808,7 +809,7 @@ pub fn live_run(
         // Process blocks in parallel using rayon (limited to PARALLEL_THREADS threads)
         // IMPORTANT: Blocks are processed in order, so each block can safely read the previous block's hash
         // after it's been written and flushed by the previous block
-        let results: Vec<(u64, Result<BlockStatus>, std::time::Duration)> = thread_pool.install(|| {
+        let results: Vec<(u64, Result<BlockStatus>, std::time::Duration, std::time::Duration)> = thread_pool.install(|| {
             blocks_with_traces
                 .into_par_iter()
                 .map(|(n, block_traces)| {
@@ -817,7 +818,8 @@ pub fn live_run(
                 
                 // Wait for previous block's hash to be available (if previous block exists)
                 // This ensures we don't race when reading hashes in get_block_hashes_array
-                if n > start_block {
+                let hash_wait_time = if n > start_block {
+                    let hash_wait_start = Instant::now();
                     let prev_block = n - 1;
                     let mut retries = 0;
                     const MAX_HASH_WAIT_RETRIES: usize = 100;
@@ -829,14 +831,17 @@ pub fn live_run(
                                 retries += 1;
                             }
                             Result::Ok(None) => {
-                                return (n, Err(anyhow!("Previous block {} hash not available after waiting", prev_block)), block_start.elapsed());
+                                return (n, Err(anyhow!("Previous block {} hash not available after waiting", prev_block)), block_start.elapsed(), std::time::Duration::ZERO);
                             }
                             Result::Err(e) => {
-                                return (n, Err(anyhow!("Failed to get hash for previous block {}: {}", prev_block, e)), block_start.elapsed());
+                                return (n, Err(anyhow!("Failed to get hash for previous block {}: {}", prev_block, e)), block_start.elapsed(), std::time::Duration::ZERO);
                             }
                         }
                     }
-                }
+                    hash_wait_start.elapsed()
+                } else {
+                    std::time::Duration::ZERO
+                };
                 
                 // Note: GPU state cannot be shared across threads, so we pass None for parallel execution
                 // GPU proving will be disabled for parallel execution
@@ -857,7 +862,7 @@ pub fn live_run(
                     )
                 };
                 let block_time = block_start.elapsed();
-                (n, result, block_time)
+                (n, result, block_time, hash_wait_time)
             })
             .collect()
         });
@@ -866,7 +871,8 @@ pub fn live_run(
         total_parallel_execution_time += batch_time;
         
         // Process results sequentially for error handling and stats
-        for (n, block_result, block_time) in results {
+        for (n, block_result, block_time, hash_wait_time) in results {
+            total_hash_wait_time += hash_wait_time;
             match block_result {
                 Result::Ok(BlockStatus::Success) => {
                     blocks_actually_processed += 1;
@@ -926,6 +932,13 @@ pub fn live_run(
                 total_batch_prep_time.as_secs_f64() / total_parallel_execution_time.as_secs_f64() * 100.0
             );
         }
+        if total_hash_wait_time.as_secs_f64() > 0.0 {
+            info!("    - Hash wait overhead: {:6.2}ms ({:5.1}% of execution, {:.1}% of total)", 
+                total_hash_wait_time.as_secs_f64() * 1000.0,
+                total_hash_wait_time.as_secs_f64() / total_parallel_execution_time.as_secs_f64() * 100.0,
+                total_hash_wait_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+            );
+        }
         info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", total_overhead_time.as_secs_f64() * 1000.0, total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
         info!("    (webhooks, error handling)");
         if total_prefetch_time.as_secs_f64() > 0.0 {
@@ -944,9 +957,18 @@ pub fn live_run(
         let avg_total_per_block = total_time.as_secs_f64() / blocks_actually_processed as f64;
         let avg_parallel_time_per_block = total_parallel_execution_time.as_secs_f64() / blocks_actually_processed as f64;
         info!("=== Per Block Averages ===");
-        info!("  Execution time:      {:.2}ms", avg_time_per_block * 1000.0);
+        info!("  Execution time (sum of individual): {:.2}ms", avg_time_per_block * 1000.0);
+        info!("    (sum of all block times / blocks, includes hash wait overhead)");
+        if total_hash_wait_time.as_secs_f64() > 0.0 {
+            let avg_hash_wait = total_hash_wait_time.as_secs_f64() / blocks_actually_processed as f64;
+            info!("    - Hash wait time: {:.2}ms per block ({:.1}% of execution time)", 
+                avg_hash_wait * 1000.0,
+                avg_hash_wait / avg_time_per_block * 100.0
+            );
+        }
         info!("  Total time (w/ overhead): {:.2}ms", avg_total_per_block * 1000.0);
-        info!("  Parallel execution time: {:.2}ms", avg_parallel_time_per_block * 1000.0);
+        info!("  Parallel execution time (wall-clock): {:.2}ms", avg_parallel_time_per_block * 1000.0);
+        info!("    (actual elapsed time per block when running in parallel)");
         info!("  Blocks per second (total):   {:.2}", blocks_actually_processed as f64 / total_time.as_secs_f64());
         if total_parallel_execution_time.as_secs_f64() > 0.0 {
             info!("  Blocks per second (parallel execution): {:.2}", blocks_actually_processed as f64 / total_parallel_execution_time.as_secs_f64());
