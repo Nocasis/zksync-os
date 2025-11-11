@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context};
 use anyhow::Result;
 use rig::log::{debug, warn};
 use std::{io::Read, str::FromStr};
-use ureq::json;
+use serde_json::json;
 
 /// Converts u64 to hex string with "0x" prefix.
 fn to_hex(n: u64) -> String {
@@ -239,24 +239,29 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     let network_start = Instant::now();
     
     let response = ureq::post(endpoint)
-        .set("Content-Type", "application/json")
-        .set("Accept-Encoding", "zstd, gzip")
+        .header("Content-Type", "application/json")
+        .header("Accept-Encoding", "zstd, gzip")
         .send_json(body)?;
     
     let network_time = network_start.elapsed();
     
-    let content_encoding = response.header("Content-Encoding")
+    // Get Content-Encoding header from response
+    let content_encoding = response.headers()
+        .get("Content-Encoding")
+        .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
     
-    let mut reader = response.into_reader();
-    use std::io::Read;
-    
-    // Read raw bytes first, then decompress separately to measure actual CPU time
-    // Support both zstd (for QuickNode) and gzip (for Alchemy)
+    // Note: With ureq 3.x and gzip feature enabled, gzip responses are auto-decompressed
+    // We need to read the body to get the decompressed content
+    // For zstd, we still need to manually decompress
     let read_start = Instant::now();
+    let body = response.into_body();
     let mut raw_bytes = Vec::new();
-    reader.read_to_end(&mut raw_bytes)?;
+    {
+        let mut reader = body.into_reader();
+        reader.read_to_end(&mut raw_bytes)?;
+    }
     let read_time = read_start.elapsed();
     let raw_size = raw_bytes.len();
     
@@ -264,6 +269,8 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
         raw_size, content_encoding
     );
     
+    // Note: With ureq 3.x and gzip feature, gzip responses are automatically decompressed
+    // We only need to manually decompress zstd
     let decompressed_bytes = if content_encoding.contains("zstd") {
         let compressed_bytes = raw_bytes;
         let compressed_size = compressed_bytes.len();
@@ -294,42 +301,22 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
         );
         
         decompressed
-    } else if content_encoding.contains("gzip") {
-        // Read compressed data from network (already read above)
-        let compressed_bytes = raw_bytes;
-        let compressed_size = compressed_bytes.len();
-        
-        // Decompress gzip
-        let decompress_start = Instant::now();
-        use flate2::read::GzDecoder;
-        let mut decoder = GzDecoder::new(&compressed_bytes[..]);
-        let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed)
-            .context("Failed to decompress gzip response")?;
-        let decompress_time = decompress_start.elapsed();
-        
-        let space_saved = if decompressed.len() > 0 {
-            (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
-        } else {
-            0.0
-        };
-        
-        debug!("RPC gzip: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
-            read_time.as_secs_f64() * 1000.0,
-            compressed_size,
-            decompress_time.as_secs_f64() * 1000.0,
-            decompressed.len(),
-            space_saved,
-            (read_time + decompress_time).as_secs_f64() * 1000.0
-        );
-        
-        decompressed
     } else {
-        // No compression - use raw bytes (already read above)
-        debug!("RPC read: {:.2}ms ({} bytes, uncompressed)", 
+        // No compression or gzip (ureq auto-decompresses gzip)
+        // raw_bytes is already decompressed for gzip, or uncompressed for no compression
+        if content_encoding.contains("gzip") {
+            let decompressed_size = raw_bytes.len();
+            // Content-Length not available (likely using Transfer-Encoding: chunked)
+            debug!("RPC gzip: read={:.2}ms ({} bytes decompressed, compressed size unknown (chunked), auto-decompressed by ureq)", 
             read_time.as_secs_f64() * 1000.0,
-            raw_bytes.len()
+            decompressed_size
         );
+        } else {
+            debug!("RPC read: {:.2}ms ({} bytes, uncompressed)", 
+                read_time.as_secs_f64() * 1000.0,
+                raw_bytes.len()
+            );
+        }
         raw_bytes
     };
     
