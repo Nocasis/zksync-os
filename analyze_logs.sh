@@ -72,7 +72,41 @@ for log_file in "${LOG_FILES[@]}"; do
     # Blocks per second line format: "[timestamp INFO module]   Blocks per second:  0.27"
     BPS=$(grep "Blocks per second:" "$log_file" | tail -1 | awk '{print $NF}')
     
-    if [ ! -z "$BLOCKS_PROCESSED" ] && [ "$BLOCKS_PROCESSED" != "0" ]; then
+    # For running processes, count "Running block:" messages to show progress
+    if [ "$STATUS" = "running" ] && [ -z "$BLOCKS_PROCESSED" ]; then
+        BLOCKS_RUNNING=$(grep "Running block:" "$log_file" | wc -l | tr -d ' ')
+        LAST_BLOCK=$(grep "Running block:" "$log_file" | tail -1 | grep -oE 'Running block: [0-9]+' | awk '{print $3}')
+        
+        # Extract block range from log to calculate percentage
+        BLOCK_RANGE=$(grep "Blocks:.*to" "$log_file" | head -1 | grep -oE 'Blocks: [0-9]+ to [0-9]+')
+        if [ ! -z "$BLOCK_RANGE" ]; then
+            START_BLOCK=$(echo "$BLOCK_RANGE" | awk '{print $2}')
+            END_BLOCK=$(echo "$BLOCK_RANGE" | awk '{print $4}')
+            TOTAL_BLOCKS_RANGE=$((END_BLOCK - START_BLOCK + 1))
+            
+            if [ ! -z "$BLOCKS_RUNNING" ] && [ "$BLOCKS_RUNNING" != "0" ] && [ "$TOTAL_BLOCKS_RANGE" -gt 0 ]; then
+                PERCENTAGE=$(echo "scale=1; $BLOCKS_RUNNING * 100 / $TOTAL_BLOCKS_RANGE" | bc -l 2>/dev/null || echo "0")
+                echo "  Blocks processed so far: $BLOCKS_RUNNING / $TOTAL_BLOCKS_RANGE ($PERCENTAGE%)"
+                if [ ! -z "$LAST_BLOCK" ]; then
+                    echo "  Last block: $LAST_BLOCK"
+                fi
+            elif [ ! -z "$BLOCKS_RUNNING" ] && [ "$BLOCKS_RUNNING" != "0" ]; then
+                echo "  Blocks processed so far: $BLOCKS_RUNNING"
+                if [ ! -z "$LAST_BLOCK" ]; then
+                    echo "  Last block: $LAST_BLOCK"
+                fi
+            else
+                echo "  No blocks processed yet (may still be initializing)"
+            fi
+        elif [ ! -z "$BLOCKS_RUNNING" ] && [ "$BLOCKS_RUNNING" != "0" ]; then
+            echo "  Blocks processed so far: $BLOCKS_RUNNING"
+            if [ ! -z "$LAST_BLOCK" ]; then
+                echo "  Last block: $LAST_BLOCK"
+            fi
+        else
+            echo "  No blocks processed yet (may still be initializing)"
+        fi
+    elif [ ! -z "$BLOCKS_PROCESSED" ] && [ "$BLOCKS_PROCESSED" != "0" ]; then
         echo "  Blocks processed: $BLOCKS_PROCESSED"
         if [ ! -z "$TOTAL_TIME_MS" ]; then
             echo "  Total time: ${TOTAL_TIME_MS}ms"
