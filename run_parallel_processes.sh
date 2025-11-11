@@ -11,16 +11,36 @@ TOTAL_BLOCKS=$((END_BLOCK - START_BLOCK + 1))
 BLOCKS_PER_PROCESS=$((TOTAL_BLOCKS / NUM_PROCESSES))
 REMAINDER=$((TOTAL_BLOCKS % NUM_PROCESSES))
 
+# Extract endpoint provider name for metadata (e.g., "alchemy" from "eth-sepolia.g.alchemy.com")
+ENDPOINT_PROVIDER=$(echo "$ENDPOINT" | sed -E 's|https?://([^/]+).*|\1|' | sed 's/\./ /g' | awk '{print $NF}')
+
+# Create log directory with metadata
+LOG_DIR_BASE=${LOG_DIR:-"logs_parallel"}
+LOG_DIR="${LOG_DIR_BASE}_start_${START_BLOCK}_end_${END_BLOCK}_procs_${NUM_PROCESSES}"
+mkdir -p "$LOG_DIR"
+
+# Save metadata to file
+cat > "$LOG_DIR/metadata.txt" <<EOF
+Start Block: $START_BLOCK
+End Block: $END_BLOCK
+Total Blocks: $TOTAL_BLOCKS
+Number of Processes: $NUM_PROCESSES
+Blocks per Process: $BLOCKS_PER_PROCESS
+Remainder: $REMAINDER
+Endpoint: $ENDPOINT
+Endpoint Provider: $ENDPOINT_PROVIDER
+DB Path Base: $DB_PATH
+Webhook: ${WEBHOOK:-"none"}
+Started: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+EOF
+
 echo "=== Running $NUM_PROCESSES Single-Threaded Processes ==="
 echo "Total blocks: $TOTAL_BLOCKS"
 echo "Blocks per process: $BLOCKS_PER_PROCESS"
 echo "Remainder: $REMAINDER"
 echo "Endpoint: $ENDPOINT"
+echo "Log directory: $LOG_DIR"
 echo ""
-
-# Create log directory
-LOG_DIR=${LOG_DIR:-"logs_parallel"}
-mkdir -p "$LOG_DIR"
 
 # Start processes
 PIDS=()
@@ -72,7 +92,10 @@ echo ""
 echo "=== Processes are running in background ==="
 echo "You can safely exit SSH. Processes will continue running."
 echo ""
-echo "To check status, run: ./analyze_logs.sh"
+echo "Log directory: $LOG_DIR"
+echo "Metadata saved to: $LOG_DIR/metadata.txt"
+echo ""
+echo "To check status, run: ./analyze_logs.sh $LOG_DIR"
 echo "To stop processes, run: pkill -f 'eth_runner.*live-run'"
 echo ""
 echo "PIDs saved to: $LOG_DIR/pids.txt"
