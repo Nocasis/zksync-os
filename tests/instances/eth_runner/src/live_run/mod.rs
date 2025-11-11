@@ -20,10 +20,13 @@ use reqwest::blocking::Client;
 use serde_json::json;
 use std::backtrace::Backtrace;
 use std::panic;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
 const PREFETCH_SIZE: usize = 8; // Prefetch 8 blocks ahead (8 * 5 = 40 RPC calls, under 50 req/s limit) // TODO: adjust this value
+const PARALLEL_THREADS: usize = 4; // Number of threads for parallel block execution
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
@@ -610,7 +613,7 @@ pub fn live_run(
     let gpu_state = &mut Some(&mut gpu_state);
 
     #[cfg(not(feature = "gpu"))]
-    let gpu_state = &mut None;
+    let gpu_state: &mut Option<&mut GpuSharedState> = &mut None;
 
     let mut total_block_time = std::time::Duration::ZERO;
     let mut total_overhead_time = std::time::Duration::ZERO;
@@ -622,12 +625,17 @@ pub fn live_run(
     
     let mut prefetch_cache = std::collections::HashMap::<u64, BlockTraces>::new();
     let mut next_block_to_prefetch = start_block;
+    let mut current_block = start_block;
     
-    for n in start_block..=end_block {
-        let loop_iter_start = Instant::now();
-        
+    // Create a thread pool for parallel block execution
+    let thread_pool = ThreadPoolBuilder::new()
+        .num_threads(PARALLEL_THREADS)
+        .build()
+        .context("Failed to create thread pool")?;
+    
+    while current_block <= end_block {
         // Prefetch next batch if cache is empty and we haven't reached end_block
-        // This implements batch-based prefetching: prefetch 8 blocks, execute them, then prefetch next batch
+        // This implements batch-based prefetching: prefetch PREFETCH_SIZE blocks, execute them in parallel (PARALLEL_THREADS threads), then prefetch next batch
         if prefetch_cache.is_empty() && next_block_to_prefetch <= end_block {
             let prefetch_timing_start = Instant::now();
             let prefetch_range_end = (next_block_to_prefetch + PREFETCH_SIZE as u64 - 1).min(end_block);
@@ -674,63 +682,145 @@ pub fn live_run(
             }
         }
         
-        let status_check_start = Instant::now();
-        let status = db.get_block_status(n)?;
-        let status_check_time = status_check_start.elapsed();
-        let already_succeeded = status.is_some_and(|s| matches!(s, BlockStatus::Success));
+        // Collect blocks to process in this batch (from prefetch_cache, in order)
+        let mut blocks_to_process: Vec<u64> = prefetch_cache.keys()
+            .copied()
+            .filter(|&n| n >= current_block && n <= end_block)
+            .collect();
+        blocks_to_process.sort();
         
-        if skip_successful && already_succeeded {
-            debug!("Skipping block {n}, already succeeded");
-            prefetch_cache.remove(&n);
-            total_overhead_time += loop_iter_start.elapsed();
+        // Limit to PREFETCH_SIZE to process one batch at a time
+        if blocks_to_process.len() > PREFETCH_SIZE {
+            blocks_to_process.truncate(PREFETCH_SIZE);
+        }
+        
+        if blocks_to_process.is_empty() {
+            // No blocks to process, advance to next block
+            current_block += 1;
             continue;
         }
         
-        let block_start = Instant::now();
-        let block_traces = match prefetch_cache.remove(&n) {
-            Some(traces) => {
-                prefetch_hits += 1;
-                traces
-            }
-            None => {
-                prefetch_misses += 1;
-                fetch_block_traces(n, &db, &endpoint)?
-            }
-        };
+        // Process blocks in parallel
+        let batch_start = Instant::now();
+        let db_clone = db.clone();
+        let endpoint_clone = endpoint.clone();
+        let witness_output_dir_clone = witness_output_dir.clone();
+        let profile_clone = profile.clone();
         
-        let block_result = run_block_with_prefetch(
-            n,
-            &db,
-            &endpoint,
-            witness_output_dir.clone(),
-            persist_all,
-            chain_id,
-            single_tx,
-            gpu_state,
-            only_forward,
-            profile.clone(),
-            block_traces,
-        );
-        let block_time = block_start.elapsed();
+        // Prepare data for parallel processing
+        let mut blocks_with_traces: Vec<(u64, BlockTraces)> = Vec::new();
+        let mut blocks_to_fetch: Vec<u64> = Vec::new();
         
-        if let BlockStatus::Error(e) = block_result? {
-            failures += 1;
-            let webhook_start = Instant::now();
-            if let Some(webhook) = webhook.as_ref() {
-                let msg = format!(":rotating_light: eth_runner: Block {n} on chain with id {chain_id} failed with: {e:?}");
-                send_slack(webhook, &msg)?
+        for &n in &blocks_to_process {
+            // Check if we should skip this block
+            if let Result::Ok(Some(status)) = db_clone.get_block_status(n) {
+                if skip_successful {
+                    if let BlockStatus::Success = status {
+                        debug!("Skipping block {n}, already succeeded");
+                        continue;
+                    }
+                }
             }
-            total_overhead_time += webhook_start.elapsed();
             
-            if failures == MAX_FAILURES {
-                error!("Reached max number of failures");
-                panic!()
+            if let Some(traces) = prefetch_cache.remove(&n) {
+                blocks_with_traces.push((n, traces));
+                prefetch_hits += 1;
+            } else {
+                blocks_to_fetch.push(n);
+                prefetch_misses += 1;
             }
         }
         
-        blocks_actually_processed += 1;
-        total_block_time += block_time;
-        total_overhead_time += status_check_time + (loop_iter_start.elapsed() - block_time - status_check_time);
+        // Fetch any blocks that weren't in the prefetch cache
+        for n in blocks_to_fetch {
+            match fetch_block_traces(n, &db_clone, &endpoint_clone) {
+                Result::Ok(traces) => blocks_with_traces.push((n, traces)),
+                Result::Err(e) => {
+                    error!("Failed to fetch traces for block {n}: {e:?}");
+                    // Continue with other blocks
+                }
+            }
+        }
+        
+        if blocks_with_traces.is_empty() {
+            current_block = blocks_to_process.last().copied().unwrap_or(current_block) + 1;
+            continue;
+        }
+        
+        info!("Processing {} blocks in parallel ({} to {})", 
+            blocks_with_traces.len(),
+            blocks_with_traces[0].0,
+            blocks_with_traces.last().unwrap().0
+        );
+        
+        // Process blocks in parallel using rayon (limited to 4 threads)
+        let results: Vec<(u64, Result<BlockStatus>, std::time::Duration)> = thread_pool.install(|| {
+            blocks_with_traces
+                .into_par_iter()
+                .map(|(n, block_traces)| {
+                let block_start = Instant::now();
+                let db_local = db_clone.clone();
+                
+                // Note: GPU state cannot be shared across threads, so we pass None for parallel execution
+                // GPU proving will be disabled for parallel execution
+                let result = {
+                    let mut gpu_state_none: Option<&mut GpuSharedState> = None;
+                    run_block_with_prefetch(
+                        n,
+                        &db_local,
+                        &endpoint_clone,
+                        witness_output_dir_clone.clone(),
+                        persist_all,
+                        chain_id,
+                        single_tx,
+                        &mut gpu_state_none as &mut Option<&mut GpuSharedState>,
+                        only_forward,
+                        profile_clone.clone(),
+                        block_traces,
+                    )
+                };
+                let block_time = block_start.elapsed();
+                (n, result, block_time)
+            })
+            .collect()
+        });
+        
+        let batch_time = batch_start.elapsed();
+        
+        // Process results sequentially for error handling and stats
+        for (n, block_result, block_time) in results {
+            match block_result {
+                Result::Ok(BlockStatus::Success) => {
+                    blocks_actually_processed += 1;
+                    total_block_time += block_time;
+                }
+                Result::Ok(BlockStatus::Error(e)) => {
+                    failures += 1;
+                    let webhook_start = Instant::now();
+                    if let Some(webhook) = webhook.as_ref() {
+                        let msg = format!(":rotating_light: eth_runner: Block {n} on chain with id {chain_id} failed with: {e:?}");
+                        send_slack(webhook, &msg)?;
+                    }
+                    total_overhead_time += webhook_start.elapsed();
+                    
+                    if failures == MAX_FAILURES {
+                        error!("Reached max number of failures");
+                        panic!()
+                    }
+                }
+                Result::Err(e) => {
+                    failures += 1;
+                    error!("Block {n} failed with error: {e:?}");
+                    if failures == MAX_FAILURES {
+                        error!("Reached max number of failures");
+                        panic!()
+                    }
+                }
+            }
+        }
+        
+        // Advance to next batch
+        current_block = blocks_to_process.last().copied().unwrap_or(current_block) + 1;
     }
     
     let total_time = run_start.elapsed();
