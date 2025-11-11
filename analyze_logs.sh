@@ -85,7 +85,7 @@ for log_file in "${LOG_FILES[@]}"; do
             TOTAL_BLOCKS_RANGE=$((END_BLOCK - START_BLOCK + 1))
             
             if [ ! -z "$BLOCKS_RUNNING" ] && [ "$BLOCKS_RUNNING" != "0" ] && [ "$TOTAL_BLOCKS_RANGE" -gt 0 ]; then
-                PERCENTAGE=$(echo "scale=1; $BLOCKS_RUNNING * 100 / $TOTAL_BLOCKS_RANGE" | bc -l 2>/dev/null || echo "0")
+                PERCENTAGE=$(awk "BEGIN {printf \"%.1f\", $BLOCKS_RUNNING * 100.0 / $TOTAL_BLOCKS_RANGE}")
                 echo "  Blocks processed so far: $BLOCKS_RUNNING / $TOTAL_BLOCKS_RANGE ($PERCENTAGE%)"
                 if [ ! -z "$LAST_BLOCK" ]; then
                     echo "  Last block: $LAST_BLOCK"
