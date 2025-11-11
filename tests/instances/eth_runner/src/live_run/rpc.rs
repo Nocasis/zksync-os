@@ -135,10 +135,10 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
         // Add a delay between batches to respect rate limits (50 requests/second)
         // Only sleep if there are more chunks to process
         if chunk_idx < chunks.len() - 1 {
-            // Wait 1.5 seconds before next batch to respect 50 req/s limit
+            // Wait 1.1 seconds before next batch to respect 50 req/s limit
             use std::thread;
             use std::time::Duration;
-            thread::sleep(Duration::from_millis(1500)); // TODO Adjust this to be more accurate
+            thread::sleep(Duration::from_millis(1100)); // TODO Adjust this to be more accurate
         }
     }
     
