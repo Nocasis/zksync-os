@@ -19,6 +19,11 @@ LOG_DIR_BASE=${LOG_DIR:-"logs_parallel"}
 LOG_DIR="${LOG_DIR_BASE}_start_${START_BLOCK}_end_${END_BLOCK}_procs_${NUM_PROCESSES}"
 mkdir -p "$LOG_DIR"
 
+# Create DB directory with metadata
+DB_DIR_BASE=${DB_DIR:-"profiling/dbs_parallel"}
+DB_DIR="${DB_DIR_BASE}_start_${START_BLOCK}_end_${END_BLOCK}_procs_${NUM_PROCESSES}"
+mkdir -p "$DB_DIR"
+
 # Save metadata to file
 cat > "$LOG_DIR/metadata.txt" <<EOF
 Start Block: $START_BLOCK
@@ -30,6 +35,7 @@ Remainder: $REMAINDER
 Endpoint: $ENDPOINT
 Endpoint Provider: $ENDPOINT_PROVIDER
 DB Path Base: $DB_PATH
+DB Directory: $DB_DIR
 Webhook: ${WEBHOOK:-"none"}
 Started: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
 EOF
@@ -70,7 +76,7 @@ for i in $(seq 1 $NUM_PROCESSES); do
             --end-block $CURRENT_END \
             --endpoint \"$ENDPOINT\" \
             --skip-successful \
-            --db \"profiling/dbs_parallel/${DB_PATH}_proc${i}\""
+            --db \"${DB_DIR}/${DB_PATH}_proc${i}\""
         
         # Add webhook if provided
         if [ ! -z "$WEBHOOK" ]; then
@@ -93,6 +99,7 @@ echo "=== Processes are running in background ==="
 echo "You can safely exit SSH. Processes will continue running."
 echo ""
 echo "Log directory: $LOG_DIR"
+echo "DB directory: $DB_DIR"
 echo "Metadata saved to: $LOG_DIR/metadata.txt"
 echo ""
 echo "To check status, run: ./analyze_logs.sh $LOG_DIR"

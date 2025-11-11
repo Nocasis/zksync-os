@@ -10,6 +10,8 @@ use anyhow::Result;
 use rig::log::{debug, warn};
 use std::{io::Read, str::FromStr};
 use serde_json::json;
+use serde::Deserialize;
+use serde_json::Deserializer;
 
 /// Converts u64 to hex string with "0x" prefix.
 fn to_hex(n: u64) -> String {
@@ -84,8 +86,11 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
         let response = send(endpoint, json!(batch))?;
         
         // Parse the batched response (array of responses)
-        let response_value: serde_json::Value = serde_json::from_str(&response)
-            .context(format!("Failed to parse batched RPC response for block hashes. Response: {}", response))?;
+        // Use Deserializer with recursion limit disabled to handle large responses
+        let mut de = Deserializer::from_str(&response);
+        de.disable_recursion_limit();
+        let response_value: serde_json::Value = Deserialize::deserialize(&mut de)
+            .context(format!("Failed to parse batched RPC response for block hashes. Response length: {} bytes", response.len()))?;
         
         // Check if it's an array (batched response) or a single object (error)
         let responses = if response_value.is_array() {
@@ -192,8 +197,6 @@ pub fn get_difftrace(endpoint: &str, block_number: u64) -> Result<DiffTrace> {
 
 pub fn get_calltrace(endpoint: &str, block_number: u64) -> Result<CallTrace> {
     debug!("RPC: get_calltrace({block_number})");
-    use serde::Deserialize;
-    use serde_json::Deserializer;
 
     let body = json!({
         "method": "debug_traceBlockByNumber",
@@ -214,8 +217,6 @@ pub fn get_calltrace(endpoint: &str, block_number: u64) -> Result<CallTrace> {
 
 pub fn get_chain_id(endpoint: &str) -> Result<u64> {
     debug!("RPC: eth_chainId()");
-    use serde::Deserialize;
-    use serde_json::Deserializer;
 
     let body = json!({
         "method": "eth_chainId",
@@ -388,8 +389,11 @@ pub fn get_all_block_traces(
     let response = send(endpoint, batch)?;
     
     // Parse the batched response - it should be an array of response objects
-    let response_value: serde_json::Value = serde_json::from_str(&response)
-        .context(format!("Failed to parse batched RPC response. Response: {}", response))?;
+    // Use Deserializer with recursion limit disabled to handle large responses
+    let mut de = Deserializer::from_str(&response);
+    de.disable_recursion_limit();
+    let response_value: serde_json::Value = Deserialize::deserialize(&mut de)
+        .context(format!("Failed to parse batched RPC response. Response length: {} bytes", response.len()))?;
     
     // Check if it's an array (batched response) or a single object (error)
     let responses = if response_value.is_array() {
@@ -471,8 +475,6 @@ pub fn get_all_block_traces(
     let receipts: BlockReceipts = serde_json::from_value(receipts_json)?;
     
     // CallTrace needs special handling due to recursion limit
-    use serde::Deserialize;
-    use serde_json::Deserializer;
     let call_json = json!({
         "jsonrpc": "2.0",
         "result": call_result.ok_or_else(|| anyhow!("Missing call result"))?,
@@ -552,9 +554,12 @@ pub fn get_all_block_traces_batch(
     let response = send(endpoint, json!(batch))?;
     
     // Parse the batched response
+    // Use Deserializer with recursion limit disabled to handle large responses
     let parse_start = std::time::Instant::now();
-    let response_value: serde_json::Value = serde_json::from_str(&response)
-        .context(format!("Failed to parse batched RPC response. Response: {}", response))?;
+    let mut de = Deserializer::from_str(&response);
+    de.disable_recursion_limit();
+    let response_value: serde_json::Value = Deserialize::deserialize(&mut de)
+        .context(format!("Failed to parse batched RPC response. Response length: {} bytes", response.len()))?;
     let parse_time = parse_start.elapsed();
     
     debug!("RPC parse: {:.2}ms (response size: {} bytes)", 
@@ -667,8 +672,6 @@ pub fn get_all_block_traces_batch(
                 .context(format!("Failed to deserialize receipts for block {}", block_number))?;
             
             // CallTrace needs special handling due to recursion limit
-            use serde::Deserialize;
-            use serde_json::Deserializer;
             let call_json = json!({
                 "jsonrpc": "2.0",
                 "result": call_res,
