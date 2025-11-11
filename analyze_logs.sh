@@ -77,6 +77,30 @@ for log_file in "${LOG_FILES[@]}"; do
         BLOCKS_RUNNING=$(grep "Running block:" "$log_file" | wc -l | tr -d ' ')
         LAST_BLOCK=$(grep "Running block:" "$log_file" | tail -1 | grep -oE 'Running block: [0-9]+' | awk '{print $3}')
         
+        # Calculate time spent since start (from metadata.txt)
+        ELAPSED_TIME=""
+        if [ -f "$LOG_DIR/metadata.txt" ]; then
+            START_TIME=$(grep "^Started:" "$LOG_DIR/metadata.txt" | sed 's/Started: //')
+            if [ ! -z "$START_TIME" ]; then
+                # Convert start time to seconds since epoch, then calculate difference
+                START_EPOCH=$(date -u -d "$START_TIME" +%s 2>/dev/null || date -u -j -f "%Y-%m-%d %H:%M:%S UTC" "$START_TIME" +%s 2>/dev/null)
+                NOW_EPOCH=$(date -u +%s)
+                if [ ! -z "$START_EPOCH" ] && [ ! -z "$NOW_EPOCH" ]; then
+                    ELAPSED_SECONDS=$((NOW_EPOCH - START_EPOCH))
+                    ELAPSED_HOURS=$((ELAPSED_SECONDS / 3600))
+                    ELAPSED_MINS=$(((ELAPSED_SECONDS % 3600) / 60))
+                    ELAPSED_SECS=$((ELAPSED_SECONDS % 60))
+                    if [ $ELAPSED_HOURS -gt 0 ]; then
+                        ELAPSED_TIME="${ELAPSED_HOURS}h ${ELAPSED_MINS}m ${ELAPSED_SECS}s"
+                    elif [ $ELAPSED_MINS -gt 0 ]; then
+                        ELAPSED_TIME="${ELAPSED_MINS}m ${ELAPSED_SECS}s"
+                    else
+                        ELAPSED_TIME="${ELAPSED_SECONDS}s"
+                    fi
+                fi
+            fi
+        fi
+        
         # Extract block range from log to calculate percentage
         BLOCK_RANGE=$(grep "Blocks:.*to" "$log_file" | head -1 | grep -oE 'Blocks: [0-9]+ to [0-9]+')
         if [ ! -z "$BLOCK_RANGE" ]; then
@@ -90,13 +114,22 @@ for log_file in "${LOG_FILES[@]}"; do
                 if [ ! -z "$LAST_BLOCK" ]; then
                     echo "  Last block: $LAST_BLOCK"
                 fi
+                if [ ! -z "$ELAPSED_TIME" ]; then
+                    echo "  Time spent: $ELAPSED_TIME"
+                fi
             elif [ ! -z "$BLOCKS_RUNNING" ] && [ "$BLOCKS_RUNNING" != "0" ]; then
                 echo "  Blocks processed so far: $BLOCKS_RUNNING"
                 if [ ! -z "$LAST_BLOCK" ]; then
                     echo "  Last block: $LAST_BLOCK"
                 fi
+                if [ ! -z "$ELAPSED_TIME" ]; then
+                    echo "  Time spent: $ELAPSED_TIME"
+                fi
             else
                 echo "  No blocks processed yet (may still be initializing)"
+                if [ ! -z "$ELAPSED_TIME" ]; then
+                    echo "  Time spent: $ELAPSED_TIME"
+                fi
             fi
         elif [ ! -z "$BLOCKS_RUNNING" ] && [ "$BLOCKS_RUNNING" != "0" ]; then
             echo "  Blocks processed so far: $BLOCKS_RUNNING"
