@@ -26,7 +26,7 @@ use rayon::ThreadPoolBuilder;
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
 const PREFETCH_SIZE: usize = 8; // Prefetch 8 blocks ahead (8 * 5 = 40 RPC calls, under 50 req/s limit) // TODO: adjust this value
-const PARALLEL_THREADS: usize = 4; // Number of threads for parallel block execution
+const PARALLEL_THREADS: usize = 8; // Number of threads for parallel block execution
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
@@ -280,10 +280,12 @@ fn run_block_with_prefetch(
         call,
     } = block_traces;
     // set block hash for future blocks to use
+    // IMPORTANT: Flush immediately so parallel blocks can see this hash
     db.set_block_hash(
         block_number,
         U256::from_be_bytes(block.result.header.hash.0),
     )?;
+    db.flush()?; // Flush hash immediately for parallel execution
     info!("\n ===================");
     info!("Running block: {block_number}");
 
@@ -293,8 +295,7 @@ fn run_block_with_prefetch(
     if calls_unsupported_precompile {
         // Here it makes little sense to run the block, as the post check is gonna fail
         // We just skip it, marking it as successful
-        // Flush the hash write before returning
-        db.flush()?;
+        // Hash already flushed above
         warn!("Skipping block {block_number}, as it calls to an unsupported precompile");
         return Ok(BlockStatus::Success);
     }
@@ -615,7 +616,8 @@ pub fn live_run(
     #[cfg(not(feature = "gpu"))]
     let gpu_state: &mut Option<&mut GpuSharedState> = &mut None;
 
-    let mut total_block_time = std::time::Duration::ZERO;
+    let mut total_block_time = std::time::Duration::ZERO; // Sum of all block execution times (for averages)
+    let mut total_parallel_execution_time = std::time::Duration::ZERO; // Actual wall-clock time for parallel execution
     let mut total_overhead_time = std::time::Duration::ZERO;
     let mut total_prefetch_time = std::time::Duration::ZERO;
     let mut blocks_actually_processed = 0u64;
@@ -753,13 +755,38 @@ pub fn live_run(
             blocks_with_traces.last().unwrap().0
         );
         
-        // Process blocks in parallel using rayon (limited to 4 threads)
+        // Process blocks in parallel using rayon (limited to PARALLEL_THREADS threads)
+        // IMPORTANT: Blocks are processed in order, so each block can safely read the previous block's hash
+        // after it's been written and flushed by the previous block
         let results: Vec<(u64, Result<BlockStatus>, std::time::Duration)> = thread_pool.install(|| {
             blocks_with_traces
                 .into_par_iter()
                 .map(|(n, block_traces)| {
                 let block_start = Instant::now();
                 let db_local = db_clone.clone();
+                
+                // Wait for previous block's hash to be available (if previous block exists)
+                // This ensures we don't race when reading hashes in get_block_hashes_array
+                if n > start_block {
+                    let prev_block = n - 1;
+                    let mut retries = 0;
+                    const MAX_HASH_WAIT_RETRIES: usize = 100;
+                    loop {
+                        match db_local.get_block_hash(prev_block) {
+                            Result::Ok(Some(_)) => break, // Hash is available
+                            Result::Ok(None) if retries < MAX_HASH_WAIT_RETRIES => {
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                                retries += 1;
+                            }
+                            Result::Ok(None) => {
+                                return (n, Err(anyhow!("Previous block {} hash not available after waiting", prev_block)), block_start.elapsed());
+                            }
+                            Result::Err(e) => {
+                                return (n, Err(anyhow!("Failed to get hash for previous block {}: {}", prev_block, e)), block_start.elapsed());
+                            }
+                        }
+                    }
+                }
                 
                 // Note: GPU state cannot be shared across threads, so we pass None for parallel execution
                 // GPU proving will be disabled for parallel execution
@@ -786,6 +813,7 @@ pub fn live_run(
         });
         
         let batch_time = batch_start.elapsed();
+        total_parallel_execution_time += batch_time;
         
         // Process results sequentially for error handling and stats
         for (n, block_result, block_time) in results {
@@ -827,7 +855,7 @@ pub fn live_run(
     let blocks_in_range = (end_block - start_block + 1) as f64;
     let total_overhead_other = total_time
         .saturating_sub(init_time)
-        .saturating_sub(total_block_time)
+        .saturating_sub(total_parallel_execution_time)
         .saturating_sub(total_overhead_time)
         .saturating_sub(total_prefetch_time);
     
@@ -840,7 +868,7 @@ pub fn live_run(
     info!("=== Timing Breakdown ===");
     info!("  Initialization:      {:6.2}ms ({:5.1}%)", init_time.as_secs_f64() * 1000.0, init_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
     if blocks_actually_processed > 0 {
-        info!("  Block execution:      {:6.2}ms ({:5.1}%)", total_block_time.as_secs_f64() * 1000.0, total_block_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        info!("  Block execution:      {:6.2}ms ({:5.1}%)", total_parallel_execution_time.as_secs_f64() * 1000.0, total_parallel_execution_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
         info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", total_overhead_time.as_secs_f64() * 1000.0, total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
         info!("    (status checks, loop, webhooks)");
         if total_prefetch_time.as_secs_f64() > 0.0 {
@@ -857,10 +885,15 @@ pub fn live_run(
     if blocks_actually_processed > 0 {
         let avg_time_per_block = total_block_time.as_secs_f64() / blocks_actually_processed as f64;
         let avg_total_per_block = total_time.as_secs_f64() / blocks_actually_processed as f64;
+        let avg_parallel_time_per_block = total_parallel_execution_time.as_secs_f64() / blocks_actually_processed as f64;
         info!("=== Per Block Averages ===");
         info!("  Execution time:      {:.2}ms", avg_time_per_block * 1000.0);
         info!("  Total time (w/ overhead): {:.2}ms", avg_total_per_block * 1000.0);
-        info!("  Blocks per second:   {:.2}", blocks_actually_processed as f64 / total_time.as_secs_f64());
+        info!("  Parallel execution time: {:.2}ms", avg_parallel_time_per_block * 1000.0);
+        info!("  Blocks per second (total):   {:.2}", blocks_actually_processed as f64 / total_time.as_secs_f64());
+        if total_parallel_execution_time.as_secs_f64() > 0.0 {
+            info!("  Blocks per second (parallel execution): {:.2}", blocks_actually_processed as f64 / total_parallel_execution_time.as_secs_f64());
+        }
         if prefetch_hits + prefetch_misses > 0 {
             let prefetch_hit_rate = prefetch_hits as f64 / (prefetch_hits + prefetch_misses) as f64 * 100.0;
             info!("=== Prefetch Statistics ===");
