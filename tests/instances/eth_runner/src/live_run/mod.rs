@@ -22,7 +22,7 @@ use std::backtrace::Backtrace;
 use std::panic;
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
-const PREFETCH_SIZE: usize = 8; // Prefetch size (8 * 5 = 40 RPC calls, under 50 req/s limit)
+const PREFETCH_SIZE: usize = 1; // Prefetch size (8 * 5 = 40 RPC calls, under 50 req/s limit)
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
