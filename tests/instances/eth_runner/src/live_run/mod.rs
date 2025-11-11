@@ -25,8 +25,9 @@ use rayon::ThreadPoolBuilder;
 
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
-const PREFETCH_SIZE: usize = 8; // Prefetch 8 blocks ahead (8 * 5 = 40 RPC calls, under 50 req/s limit) // TODO: adjust this value
-const PARALLEL_THREADS: usize = 8; // Number of threads for parallel block execution
+const PREFETCH_SIZE: usize = 8; // Base prefetch size (8 * 5 = 40 RPC calls, under 50 req/s limit) // TODO: adjust this value
+const PARALLEL_THREADS: usize = 6; // Number of threads for parallel block execution
+const PREFETCH_MULTIPLIER: usize = 6; // Prefetch PREFETCH_SIZE * PREFETCH_MULTIPLIER blocks to keep threads busy
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
@@ -617,8 +618,9 @@ pub fn live_run(
     let gpu_state: &mut Option<&mut GpuSharedState> = &mut None;
 
     let mut total_block_time = std::time::Duration::ZERO; // Sum of all block execution times (for averages)
-    let mut total_parallel_execution_time = std::time::Duration::ZERO; // Actual wall-clock time for parallel execution
-    let mut total_overhead_time = std::time::Duration::ZERO;
+    let mut total_parallel_execution_time = std::time::Duration::ZERO; // Actual wall-clock time for parallel execution (includes batch prep)
+    let mut total_batch_prep_time = std::time::Duration::ZERO; // Time spent preparing batches (status checks, fetching missing traces)
+    let mut total_overhead_time = std::time::Duration::ZERO; // Per-block overhead (webhooks, etc.)
     let mut total_prefetch_time = std::time::Duration::ZERO;
     let mut blocks_actually_processed = 0u64;
     let mut prefetch_hits = 0u64;
@@ -637,20 +639,48 @@ pub fn live_run(
     
     while current_block <= end_block {
         // Prefetch next batch if cache is empty and we haven't reached end_block
-        // This implements batch-based prefetching: prefetch PREFETCH_SIZE blocks, execute them in parallel (PARALLEL_THREADS threads), then prefetch next batch
+        // This implements batch-based prefetching: prefetch PREFETCH_SIZE * PREFETCH_MULTIPLIER blocks,
+        // by calling fetch_block_traces_batch PREFETCH_MULTIPLIER times (each with PREFETCH_SIZE blocks)
+        // Each batch = PREFETCH_SIZE * 5 RPC calls (under 50 req/s limit)
+        // Then execute them in parallel batches of PARALLEL_THREADS to keep threads busy
         if prefetch_cache.is_empty() && next_block_to_prefetch <= end_block {
             let prefetch_timing_start = Instant::now();
-            let prefetch_range_end = (next_block_to_prefetch + PREFETCH_SIZE as u64 - 1).min(end_block);
+            let total_blocks_to_prefetch = PREFETCH_SIZE * PREFETCH_MULTIPLIER;
+            let prefetch_range_end = (next_block_to_prefetch + total_blocks_to_prefetch as u64 - 1).min(end_block);
             
             if next_block_to_prefetch <= prefetch_range_end {
-                let prefetch_blocks: Vec<u64> = (next_block_to_prefetch..=prefetch_range_end)
-                    .filter(|&block_num| {
-                        db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
-                    })
-                    .collect();
+                let mut total_prefetched = 0u64;
+                let mut prefetch_failed = false;
                 
-                if !prefetch_blocks.is_empty() {
-                    debug!("Prefetching {} blocks ({} to {})", 
+                // Prefetch in multiple batches of PREFETCH_SIZE to respect rate limits
+                // Each batch = PREFETCH_SIZE blocks * 5 RPC calls = 40 RPC calls (under 50 req/s limit)
+                for batch_idx in 0..PREFETCH_MULTIPLIER {
+                    if next_block_to_prefetch > prefetch_range_end {
+                        break; // No more blocks to prefetch
+                    }
+                    
+                    let batch_start = next_block_to_prefetch;
+                    let batch_end = (batch_start + PREFETCH_SIZE as u64 - 1).min(prefetch_range_end);
+                    
+                    if batch_start > batch_end {
+                        break;
+                    }
+                    
+                    let prefetch_blocks: Vec<u64> = (batch_start..=batch_end)
+                        .filter(|&block_num| {
+                            db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
+                        })
+                        .collect();
+                    
+                    if prefetch_blocks.is_empty() {
+                        // All blocks in this batch are already in DB, skip to next batch
+                        next_block_to_prefetch = batch_end + 1;
+                        continue;
+                    }
+                    
+                    debug!("Prefetching batch {}/{}: {} blocks ({} to {})", 
+                        batch_idx + 1,
+                        PREFETCH_MULTIPLIER,
                         prefetch_blocks.len(), 
                         prefetch_blocks[0], 
                         prefetch_blocks.last().unwrap()
@@ -659,25 +689,41 @@ pub fn live_run(
                     match fetch_block_traces_batch(&prefetch_blocks, &db, &endpoint) {
                         std::result::Result::Ok(batch_results) => {
                             let prefetched_count = batch_results.len() as u64;
+                            total_prefetched += prefetched_count;
                             total_blocks_prefetched += prefetched_count;
                             prefetch_cache.extend(batch_results);
                             next_block_to_prefetch = prefetch_blocks.last().copied().unwrap_or(next_block_to_prefetch) + 1;
                             
-                            let prefetch_time = prefetch_timing_start.elapsed();
-                            total_prefetch_time += prefetch_time;
-                            debug!("Prefetched {} blocks in {:.2}ms ({:.2}ms per block)", 
-                                prefetched_count,
-                                prefetch_time.as_secs_f64() * 1000.0,
-                                prefetch_time.as_secs_f64() * 1000.0 / prefetched_count as f64
+                            debug!("Prefetched batch {}/{}: {} blocks in this batch", 
+                                batch_idx + 1,
+                                PREFETCH_MULTIPLIER,
+                                prefetched_count
                             );
                         }
-                        std::result::Result::Err(_) => {
-                            warn!("Failed to prefetch blocks, will fetch individually if needed");
+                        std::result::Result::Err(e) => {
+                            warn!("Failed to prefetch batch {}/{}: {}, will fetch individually if needed", 
+                                batch_idx + 1,
+                                PREFETCH_MULTIPLIER,
+                                e
+                            );
+                            prefetch_failed = true;
                             // On error, skip to next block to avoid infinite loop
                             next_block_to_prefetch += 1;
+                            break;
                         }
                     }
-                } else {
+                }
+                
+                if total_prefetched > 0 {
+                    let prefetch_time = prefetch_timing_start.elapsed();
+                    total_prefetch_time += prefetch_time;
+                    debug!("Prefetched {} blocks total in {:.2}ms ({:.2}ms per block, {} batches)", 
+                        total_prefetched,
+                        prefetch_time.as_secs_f64() * 1000.0,
+                        prefetch_time.as_secs_f64() * 1000.0 / total_prefetched as f64,
+                        if prefetch_failed { "partial" } else { "all" }
+                    );
+                } else if next_block_to_prefetch <= prefetch_range_end {
                     // All blocks in range are already in DB, skip to next batch
                     next_block_to_prefetch = prefetch_range_end + 1;
                 }
@@ -691,9 +737,10 @@ pub fn live_run(
             .collect();
         blocks_to_process.sort();
         
-        // Limit to PREFETCH_SIZE to process one batch at a time
-        if blocks_to_process.len() > PREFETCH_SIZE {
-            blocks_to_process.truncate(PREFETCH_SIZE);
+        // Process up to PARALLEL_THREADS blocks at a time (one parallel batch)
+        // This allows us to prefetch more blocks than we process, keeping threads busy
+        if blocks_to_process.len() > PARALLEL_THREADS {
+            blocks_to_process.truncate(PARALLEL_THREADS);
         }
         
         if blocks_to_process.is_empty() {
@@ -710,6 +757,7 @@ pub fn live_run(
         let profile_clone = profile.clone();
         
         // Prepare data for parallel processing
+        let prep_start = Instant::now();
         let mut blocks_with_traces: Vec<(u64, BlockTraces)> = Vec::new();
         let mut blocks_to_fetch: Vec<u64> = Vec::new();
         
@@ -743,6 +791,8 @@ pub fn live_run(
                 }
             }
         }
+        let prep_time = prep_start.elapsed();
+        total_batch_prep_time += prep_time;
         
         if blocks_with_traces.is_empty() {
             current_block = blocks_to_process.last().copied().unwrap_or(current_block) + 1;
@@ -853,6 +903,7 @@ pub fn live_run(
     
     let total_time = run_start.elapsed();
     let blocks_in_range = (end_block - start_block + 1) as f64;
+    // Note: total_batch_prep_time is already included in total_parallel_execution_time, so we don't subtract it separately
     let total_overhead_other = total_time
         .saturating_sub(init_time)
         .saturating_sub(total_parallel_execution_time)
@@ -869,8 +920,14 @@ pub fn live_run(
     info!("  Initialization:      {:6.2}ms ({:5.1}%)", init_time.as_secs_f64() * 1000.0, init_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
     if blocks_actually_processed > 0 {
         info!("  Block execution:      {:6.2}ms ({:5.1}%)", total_parallel_execution_time.as_secs_f64() * 1000.0, total_parallel_execution_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        if total_batch_prep_time.as_secs_f64() > 0.0 {
+            info!("    - Batch preparation: {:6.2}ms ({:5.1}% of execution)", 
+                total_batch_prep_time.as_secs_f64() * 1000.0,
+                total_batch_prep_time.as_secs_f64() / total_parallel_execution_time.as_secs_f64() * 100.0
+            );
+        }
         info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", total_overhead_time.as_secs_f64() * 1000.0, total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-        info!("    (status checks, loop, webhooks)");
+        info!("    (webhooks, error handling)");
         if total_prefetch_time.as_secs_f64() > 0.0 {
             info!("  Prefetching:          {:6.2}ms ({:5.1}%)", total_prefetch_time.as_secs_f64() * 1000.0, total_prefetch_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
             info!("    Blocks prefetched: {} (avg {:.2}ms per block)", 
