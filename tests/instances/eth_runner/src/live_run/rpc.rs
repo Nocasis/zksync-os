@@ -235,105 +235,135 @@ pub fn get_chain_id(endpoint: &str) -> Result<u64> {
 
 fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     use std::time::Instant;
+    use std::time::Duration;
+    
+    const MAX_RETRIES: u32 = 3;
+    const INITIAL_RETRY_DELAY_MS: u64 = 100;
     
     let request_size = serde_json::to_string(&body)?.len();
     let network_start = Instant::now();
     
-    let response = ureq::post(endpoint)
-        .header("Content-Type", "application/json")
-        .header("Accept-Encoding", "zstd, gzip")
-        .send_json(body)?;
-    
-    let network_time = network_start.elapsed();
-    
-    // Get Content-Encoding header from response
-    let content_encoding = response.headers()
-        .get("Content-Encoding")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "none".to_string());
-    
-    // Note: With ureq 3.x and gzip feature enabled, gzip responses are auto-decompressed
-    // We need to read the body to get the decompressed content
-    // For zstd, we still need to manually decompress
-    let read_start = Instant::now();
-    let body = response.into_body();
-    let mut raw_bytes = Vec::new();
-    {
-        let mut reader = body.into_reader();
-        reader.read_to_end(&mut raw_bytes)?;
-    }
-    let read_time = read_start.elapsed();
-    let raw_size = raw_bytes.len();
-    
-    debug!("RPC raw response: {} bytes, Content-Encoding: '{}'", 
-        raw_size, content_encoding
-    );
-    
-    // Note: With ureq 3.x and gzip feature, gzip responses are automatically decompressed
-    // We only need to manually decompress zstd
-    let decompressed_bytes = if content_encoding.contains("zstd") {
-        let compressed_bytes = raw_bytes;
-        let compressed_size = compressed_bytes.len();
-        
-        // Now decompress (this is the fast CPU part)
-        let decompress_start = Instant::now();
-        use zstd::stream::Decoder;
-        let mut decoder = Decoder::new(&compressed_bytes[..])
-            .context("Failed to create zstd decoder")?;
-        let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed)
-            .context("Failed to decompress zstd response")?;
-        let decompress_time = decompress_start.elapsed();
-        
-        let space_saved = if decompressed.len() > 0 {
-            (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
-        } else {
-            0.0
-        };
-        
-        debug!("RPC zstd: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
-            read_time.as_secs_f64() * 1000.0,
-            compressed_size,
-            decompress_time.as_secs_f64() * 1000.0,
-            decompressed.len(),
-            space_saved,
-            (read_time + decompress_time).as_secs_f64() * 1000.0
-        );
-        
-        decompressed
-    } else {
-        // No compression or gzip (ureq auto-decompresses gzip)
-        // raw_bytes is already decompressed for gzip, or uncompressed for no compression
-        if content_encoding.contains("gzip") {
-            let decompressed_size = raw_bytes.len();
-            // Content-Length not available (likely using Transfer-Encoding: chunked)
-            debug!("RPC gzip: read={:.2}ms ({} bytes decompressed, compressed size unknown (chunked), auto-decompressed by ureq)", 
-            read_time.as_secs_f64() * 1000.0,
-            decompressed_size
-        );
-        } else {
-            debug!("RPC read: {:.2}ms ({} bytes, uncompressed)", 
-                read_time.as_secs_f64() * 1000.0,
-                raw_bytes.len()
-            );
+    let mut last_error = None;
+    for attempt in 0..=MAX_RETRIES {
+        match ureq::post(endpoint)
+            .header("Content-Type", "application/json")
+            .header("Accept-Encoding", "zstd, gzip")
+            .send_json(&body)
+        {
+            Ok(response) => {
+                // Success - continue with response processing
+                let network_time = network_start.elapsed();
+                
+                // Get Content-Encoding header from response
+                let content_encoding = response.headers()
+                    .get("Content-Encoding")
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                
+                // Note: With ureq 3.x and gzip feature enabled, gzip responses are auto-decompressed
+                // We need to read the body to get the decompressed content
+                // For zstd, we still need to manually decompress
+                let read_start = Instant::now();
+                let body = response.into_body();
+                let mut raw_bytes = Vec::new();
+                {
+                    let mut reader = body.into_reader();
+                    reader.read_to_end(&mut raw_bytes)?;
+                }
+                let read_time = read_start.elapsed();
+                let raw_size = raw_bytes.len();
+                
+                debug!("RPC raw response: {} bytes, Content-Encoding: '{}'", 
+                    raw_size, content_encoding
+                );
+                
+                // Note: With ureq 3.x and gzip feature, gzip responses are automatically decompressed
+                // We only need to manually decompress zstd
+                let decompressed_bytes = if content_encoding.contains("zstd") {
+                    let compressed_bytes = raw_bytes;
+                    let compressed_size = compressed_bytes.len();
+                    
+                    // Now decompress (this is the fast CPU part)
+                    let decompress_start = Instant::now();
+                    use zstd::stream::Decoder;
+                    let mut decoder = Decoder::new(&compressed_bytes[..])
+                        .context("Failed to create zstd decoder")?;
+                    let mut decompressed = Vec::new();
+                    decoder.read_to_end(&mut decompressed)
+                        .context("Failed to decompress zstd response")?;
+                    let decompress_time = decompress_start.elapsed();
+                    
+                    let space_saved = if decompressed.len() > 0 {
+                        (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    
+                    debug!("RPC zstd: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
+                        read_time.as_secs_f64() * 1000.0,
+                        compressed_size,
+                        decompress_time.as_secs_f64() * 1000.0,
+                        decompressed.len(),
+                        space_saved,
+                        (read_time + decompress_time).as_secs_f64() * 1000.0
+                    );
+                    
+                    decompressed
+                } else {
+                    // No compression or gzip (ureq auto-decompresses gzip)
+                    // raw_bytes is already decompressed for gzip, or uncompressed for no compression
+                    if content_encoding.contains("gzip") {
+                        let decompressed_size = raw_bytes.len();
+                        // Content-Length not available (likely using Transfer-Encoding: chunked)
+                        debug!("RPC gzip: read={:.2}ms ({} bytes decompressed, compressed size unknown (chunked), auto-decompressed by ureq)",
+                        read_time.as_secs_f64() * 1000.0,
+                        decompressed_size
+                    );
+                    } else {
+                        debug!("RPC read: {:.2}ms ({} bytes, uncompressed)",
+                            read_time.as_secs_f64() * 1000.0,
+                            raw_bytes.len()
+                        );
+                    }
+                    raw_bytes
+                };
+                
+                let out = String::from_utf8(decompressed_bytes)
+                    .context("Response is not valid UTF-8 after decompression")?;
+                
+                let response_size = out.len();
+                
+                debug!("RPC network: {:.2}ms (request: {} bytes, response: {} bytes, encoding: {})",
+                    network_time.as_secs_f64() * 1000.0,
+                    request_size,
+                    response_size,
+                    content_encoding
+                );
+                
+                return Ok(out);
+            }
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < MAX_RETRIES {
+                    let delay_ms = INITIAL_RETRY_DELAY_MS * (1 << attempt); // Exponential backoff: 100ms, 200ms, 400ms
+                    warn!("RPC request failed (attempt {}/{}): {}. Retrying in {}ms...", 
+                        attempt + 1, 
+                        MAX_RETRIES + 1,
+                        last_error.as_ref().unwrap(),
+                        delay_ms
+                    );
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                } else {
+                    // Last attempt failed
+                    break;
+                }
+            }
         }
-        raw_bytes
-    };
+    }
     
-    let out = String::from_utf8(decompressed_bytes)
-        .context("Response is not valid UTF-8 after decompression")?;
-    
-    let response_size = out.len();
-    
-    debug!("RPC network: {:.2}ms (request: {} bytes, response: {} bytes, encoding: {})",
-        network_time.as_secs_f64() * 1000.0,
-        request_size,
-        response_size,
-        content_encoding
-    );
-    
-    Ok(out)
+    // All retries exhausted
+    Err(last_error.unwrap().into())
 }
 
 /// Fetches all block traces in a single batched RPC call.
