@@ -237,7 +237,7 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     use std::time::Instant;
     use std::time::Duration;
     
-    const MAX_RETRIES: u32 = 3;
+    const MAX_RETRIES: u32 = 5;
     const INITIAL_RETRY_DELAY_MS: u64 = 100;
     
     let request_size = serde_json::to_string(&body)?.len();
