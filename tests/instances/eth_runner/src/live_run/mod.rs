@@ -6,11 +6,13 @@ use db::{BlockStatus, BlockTraces, Database, ResourceInfo};
 use rig::log::{debug, error, info, warn};
 use rig::Chain;
 use std::time::Instant;
+use std::fs;
+use std::path::Path;
 use zk_ee::system::tracer::NopTracer;
 
 use crate::calltrace::CallTrace;
 use crate::native_model::compute_ratio;
-use crate::post_check::post_check;
+use crate::post_check::{post_check, PostCheckError};
 use crate::prestate::populate_prestate;
 use crate::{
     prestate::{DiffTrace, PrestateTrace},
@@ -148,6 +150,44 @@ fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Resul
 }
 
 /// Fetches block traces for multiple blocks in a single batched HTTP request.
+/// Saves block traces to a file for reproduction when a zero address balance error occurs.
+fn save_traces_for_reproduction(block_number: u64, traces: &BlockTraces) -> Result<()> {
+    let debug_dir = Path::new("debug_reproduction");
+    fs::create_dir_all(debug_dir)?;
+    
+    // Serialize traces to JSON
+    let json_data = serde_json::to_string_pretty(traces)
+        .context("Failed to serialize traces to JSON")?;
+    
+    // Compute SHA-256 hash of the JSON data for verification
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(json_data.as_bytes());
+    hasher.update(block_number.to_be_bytes());
+    let hash = hasher.finalize();
+    let hash_hex = hex::encode(hash);
+    
+    // Save with block number, timestamp, and hash
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let filename = format!("block_{}_zero_addr_error_{}_{}.json", block_number, timestamp, &hash_hex[..8]);
+    let filepath = debug_dir.join(&filename);
+    
+    fs::write(&filepath, &json_data)
+        .context(format!("Failed to write traces to {}", filepath.display()))?;
+    
+    info!("Saved block traces for reproduction: {} (hash: {})", filepath.display(), hash_hex);
+    
+    // Also save a hash file for quick reference
+    let hash_file = debug_dir.join(format!("block_{}_hash.txt", block_number));
+    fs::write(&hash_file, format!("Block: {}\nHash: {}\nFile: {}\n", block_number, hash_hex, filename))
+        .context(format!("Failed to write hash file to {}", hash_file.display()))?;
+    
+    Ok(())
+}
+
 /// Returns a HashMap mapping block_number -> BlockTraces.
 /// Blocks already in DB are skipped and returned from cache.
 fn fetch_block_traces_batch(
@@ -494,6 +534,16 @@ fn run_block_with_prefetch(
             // Always save of them for now, even when already cached.
             // TODO: avoid persisting when read from cache.
             db.set_block_traces(block_number, &traces_clone)?;
+            
+            // If this is a zero address balance error, save traces to file for reproduction
+            if let PostCheckError::Internal { msg } = &e {
+                if msg.contains("zero address") || msg.contains("Balance for 0000000000000000000000000000000000000000") {
+                    if let Err(save_err) = save_traces_for_reproduction(block_number, &traces_clone) {
+                        warn!("Failed to save traces for reproduction: {}", save_err);
+                    }
+                }
+            }
+            
             // Flush status and traces writes
             let post_flush_start = Instant::now();
             db.flush()?;
