@@ -6,6 +6,7 @@ DB_PATH=${3:-"eth_runner"}
 ENDPOINT=${ENDPOINT:-"https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY"}
 WEBHOOK=${WEBHOOK:-""}
 NUM_PROCESSES=${NUM_PROCESSES:-6}
+REFETCH_TRACES=${REFETCH_TRACES:-""}
 
 TOTAL_BLOCKS=$((END_BLOCK - START_BLOCK + 1))
 BLOCKS_PER_PROCESS=$((TOTAL_BLOCKS / NUM_PROCESSES))
@@ -37,6 +38,7 @@ Endpoint Provider: $ENDPOINT_PROVIDER
 DB Path Base: $DB_PATH
 DB Directory: $DB_DIR
 Webhook: ${WEBHOOK:-"none"}
+REFETCH_TRACES: ${REFETCH_TRACES:-"not set"}
 Started: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
 EOF
 
@@ -69,8 +71,15 @@ for i in $(seq 1 $NUM_PROCESSES); do
     if [ $CURRENT_START -le $END_BLOCK ]; then
         echo "Starting process $i: blocks $CURRENT_START to $CURRENT_END"
         
-        # Build command with optional webhook
-        CMD="RUST_LOG=eth_runner=debug cargo run --manifest-path tests/instances/eth_runner/Cargo.toml --release --features rig/no_print,rig/unlimited_native -- \
+        # Build command with optional webhook and REFETCH_TRACES
+        CMD="RUST_LOG=eth_runner=debug"
+        
+        # Add REFETCH_TRACES if set
+        if [ ! -z "$REFETCH_TRACES" ]; then
+            CMD="$CMD REFETCH_TRACES=$REFETCH_TRACES"
+        fi
+        
+        CMD="$CMD cargo run --manifest-path tests/instances/eth_runner/Cargo.toml --release --features rig/no_print,rig/unlimited_native -- \
             live-run \
             --start-block $CURRENT_START \
             --end-block $CURRENT_END \
