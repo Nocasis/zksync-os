@@ -146,43 +146,13 @@ impl DiffTrace {
             };
             if let Some(bal) = account.balance {
                 if Some(bal) != zk_account.balance {
-                    let address_hex = hex::encode(address.to_be_bytes_vec());
-                    let difference = zk_account.balance.unwrap_or(U256::ZERO).abs_diff(bal);
-                    
-                    // Special handling for zero address - it's used for contract creation and selfdestruct
-                    // and can have non-deterministic balance due to timing/ordering issues
-                    let is_zero_address = *address == B160::ZERO;
-                    
-                    if is_zero_address {
-                        error!(
-                            "Balance mismatch for zero address (0x0000...0000) - this may be non-deterministic.\n  \
-                            ZKsync OS balance: {:?}\n  Expected (from trace): {:?}\n  Difference: {:?}\n  \
-                            This can occur due to selfdestruct operations or contract creation timing.\n  \
-                            If this is intermittent, it may indicate a race condition or state ordering issue.",
-                            zk_account.balance,
-                            bal,
-                            difference,
-                        );
-                        // For zero address, we'll still error but with more context
-                        // Note: We can't save traces here as we don't have access to them in post_check
-                        // The caller should handle saving traces when this error occurs
-                        error_internal!(
-                            "Balance for zero address {} is {:?} but expected {:?}.\n  Difference: {:?}\n  \
-                            Note: Zero address balance mismatches can be non-deterministic due to selfdestruct/creation ordering.",
-                            address_hex,
-                            zk_account.balance,
-                            bal,
-                            difference,
-                        )
-                    } else {
-                        error_internal!(
-                            "Balance for {} is {:?} but expected {:?}.\n  Difference: {:?}",
-                            address_hex,
-                            zk_account.balance,
-                            bal,
-                            difference,
-                        )
-                    }
+                    error_internal!(
+                        "Balance for {} is {:?} but expected {:?}.\n  Difference: {:?}",
+                        hex::encode(address.to_be_bytes_vec()),
+                        zk_account.balance,
+                        bal,
+                        zk_account.balance.unwrap_or(U256::ZERO).abs_diff(bal),
+                    )
                 };
             }
             if let Some(nonce) = account.nonce {

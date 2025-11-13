@@ -536,8 +536,9 @@ fn run_block_with_prefetch(
             db.set_block_traces(block_number, &traces_clone)?;
             
             // If this is a zero address balance error, save traces to file for reproduction
+            // Check for the zero address hex string in the error message
             if let PostCheckError::Internal { msg } = &e {
-                if msg.contains("zero address") || msg.contains("Balance for 0000000000000000000000000000000000000000") {
+                if msg.contains("Balance for 0000000000000000000000000000000000000000") {
                     if let Err(save_err) = save_traces_for_reproduction(block_number, &traces_clone) {
                         warn!("Failed to save traces for reproduction: {}", save_err);
                     }
