@@ -4,6 +4,7 @@ START_BLOCK=${1:-5187585}
 END_BLOCK=${2:-5187704}
 DB_PATH=${3:-"eth_runner"}
 ENDPOINT=${ENDPOINT:-"https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY"}
+BACKUP_ENDPOINT=${BACKUP_ENDPOINT:-""}
 WEBHOOK=${WEBHOOK:-""}
 NUM_PROCESSES=${NUM_PROCESSES:-6}
 REFETCH_TRACES=${REFETCH_TRACES:-""}
@@ -34,6 +35,7 @@ Number of Processes: $NUM_PROCESSES
 Blocks per Process: $BLOCKS_PER_PROCESS
 Remainder: $REMAINDER
 Endpoint: $ENDPOINT
+Backup Endpoint: ${BACKUP_ENDPOINT:-"none"}
 Endpoint Provider: $ENDPOINT_PROVIDER
 DB Path Base: $DB_PATH
 DB Directory: $DB_DIR
@@ -47,6 +49,9 @@ echo "Total blocks: $TOTAL_BLOCKS"
 echo "Blocks per process: $BLOCKS_PER_PROCESS"
 echo "Remainder: $REMAINDER"
 echo "Endpoint: $ENDPOINT"
+if [ ! -z "$BACKUP_ENDPOINT" ]; then
+    echo "Backup endpoint: $BACKUP_ENDPOINT"
+fi
 echo "Log directory: $LOG_DIR"
 echo ""
 
@@ -86,6 +91,11 @@ for i in $(seq 1 $NUM_PROCESSES); do
             --endpoint \"$ENDPOINT\" \
             --skip-successful \
             --db \"${DB_DIR}/${DB_PATH}_proc${i}\""
+        
+        # Add backup endpoint if provided
+        if [ ! -z "$BACKUP_ENDPOINT" ]; then
+            CMD="$CMD --backup-endpoint \"$BACKUP_ENDPOINT\""
+        fi
         
         # Add webhook if provided
         if [ ! -z "$WEBHOOK" ]; then

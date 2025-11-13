@@ -571,11 +571,20 @@ fn run_block_with_retries(
     single_tx: Option<u64>,
     gpu_shared_state: &mut Option<&mut GpuSharedState>,
     only_forward: bool,
+    backup_endpoint: Option<&String>,
     profile: Option<String>,
 ) -> Result<BlockStatus> {
     const MAX_RETRIES: usize = 3;
 
     for attempt in 1..=MAX_RETRIES {
+        let endpoint = if attempt == 1 {
+            endpoint
+        } else if let Some(backup) = backup_endpoint {
+            warn!("Switching to backup endpoint for block {block_number} on attempt {attempt}");
+            backup.as_str()
+        } else {
+            endpoint
+        };
         match run_block(
             block_number,
             db,
@@ -619,6 +628,7 @@ pub fn live_run(
     webhook: Option<String>,
     single_tx: Option<u64>,
     only_forward: bool,
+    backup_endpoint: Option<String>,
     profile: Option<String>,
 ) -> Result<()> {
     let run_start = Instant::now();
@@ -744,7 +754,7 @@ pub fn live_run(
         
         // Process block sequentially
         let block_start = Instant::now();
-        let result = run_block_with_prefetch(
+        let primary_result = run_block_with_prefetch(
             n,
             &db,
             &endpoint,
@@ -759,6 +769,79 @@ pub fn live_run(
         );
         let block_time = block_start.elapsed();
         total_block_time += block_time;
+        
+        // If execution failed and backup endpoint is available, retry with backup endpoint traces
+        let result = if let std::result::Result::Ok(BlockStatus::Success) = primary_result {
+            primary_result
+        } else {
+            // Execution failed - try backup endpoint if available
+            if let Some(backup) = backup_endpoint.as_ref() {
+                warn!("Block {n} failed with primary endpoint. Retrying with backup endpoint...");
+                
+                // Fetch traces from backup endpoint
+                let backup_traces_result = {
+                    let rpc_start = Instant::now();
+                    let (block, prestate, diff, receipts, call) = rpc::get_all_block_traces(backup, n)
+                        .context(format!("Failed to fetch block traces from backup endpoint for {n}"))?;
+                    let total_rpc_time = rpc_start.elapsed();
+                    debug!("RPC call for block {} from backup endpoint (batched): total={:.2}ms",
+                        n,
+                        total_rpc_time.as_secs_f64() * 1000.0
+                    );
+                    Ok(BlockTraces {
+                        block,
+                        prestate,
+                        diff,
+                        receipts,
+                        call,
+                    })
+                };
+                
+                match backup_traces_result {
+                    std::result::Result::Ok(backup_traces) => {
+                        let backup_block_start = Instant::now();
+                        let backup_result = run_block_with_prefetch(
+                            n,
+                            &db,
+                            backup,
+                            witness_output_dir.clone(),
+                            persist_all,
+                            chain_id,
+                            single_tx,
+                            gpu_state,
+                            only_forward,
+                            profile.clone(),
+                            backup_traces,
+                        );
+                        let backup_block_time = backup_block_start.elapsed();
+                        total_block_time += backup_block_time;
+                        
+                        match backup_result {
+                            std::result::Result::Ok(BlockStatus::Success) => {
+                                info!("Block {n} succeeded with backup endpoint");
+                                std::result::Result::Ok(BlockStatus::Success)
+                            }
+                            std::result::Result::Ok(BlockStatus::Error(backup_e)) => {
+                                warn!("Block {n} also failed with backup endpoint: {backup_e:?}");
+                                std::result::Result::Ok(BlockStatus::Error(backup_e))
+                            }
+                            std::result::Result::Err(backup_e) => {
+                                warn!("Block {n} also failed with backup endpoint: {backup_e:?}");
+                                std::result::Result::Err(backup_e)
+                            }
+                        }
+                    }
+                    std::result::Result::Err(fetch_err) => {
+                        error!("Failed to fetch traces from backup endpoint for block {n}: {fetch_err:?}");
+                        // Return original error
+                        primary_result
+                    }
+                }
+            } else {
+                // No backup endpoint, return original error
+                primary_result
+            }
+        };
         
         match result {
             std::result::Result::Ok(BlockStatus::Success) => {
