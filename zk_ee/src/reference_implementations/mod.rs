@@ -194,3 +194,24 @@ impl<Native: Resource + Computational> Resources for BaseResources<Native> {
         o
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::system::{errors::system::SystemError, Ergs, Resource, Resources};
+
+    use super::{BaseResources, DecreasingNative};
+
+    #[test]
+    fn test_oog_does_not_charge_native() {
+        let mut resources = BaseResources::from_ergs_and_native(Ergs(10), DecreasingNative(100));
+        let r = resources.charge(&BaseResources {
+            ergs: Ergs(11),
+            native: DecreasingNative(101),
+        });
+        assert!(r.is_err_and(|e| matches!(
+            e,
+            SystemError::LeafRuntime(crate::system::errors::runtime::RuntimeError::OutOfErgs(_))
+        )));
+        assert_eq!(resources.native().0, 100);
+    }
+}
