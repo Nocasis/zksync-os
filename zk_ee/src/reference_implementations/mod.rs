@@ -98,13 +98,14 @@ impl<Native: Resource> Resource for BaseResources<Native> {
     }
 
     fn charge(&mut self, to_charge: &Self) -> Result<(), SystemError> {
-        if let Err(e) = self.native.charge(&to_charge.native) {
-            // If both out of ergs and native, just keep the native
-            // error.
-            let _ = self.ergs.charge(&to_charge.ergs);
+        if let Err(e) = self.ergs.charge(&to_charge.ergs) {
+            // This method pre-charges for computation, both in ergs and native.
+            // We first charge ergs, if they are insufficient, we do not charge
+            // native, as the execution will halt with OOE and the computation
+            // being charged for isn't performed.
             return Err(e);
         } else {
-            self.ergs.charge(&to_charge.ergs)?
+            self.native.charge(&to_charge.native)?
         };
         Ok(())
     }
