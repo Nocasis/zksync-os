@@ -24,7 +24,7 @@ use std::backtrace::Backtrace;
 use std::panic;
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
-const PREFETCH_SIZE: usize = 1; // Prefetch size (8 * 5 = 40 RPC calls, under 50 req/s limit)
+const PREFETCH_SIZE: usize = 4; // Prefetch size (8 * 5 = 40 RPC calls, under 50 req/s limit)
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
@@ -617,6 +617,260 @@ fn run_block_with_retries(
 /// Run blocks from [start_block] to [end_block].
 ///
 #[allow(clippy::too_many_arguments)]
+struct RunStatistics {
+    total_block_time: std::time::Duration,
+    total_overhead_time: std::time::Duration,
+    total_prefetch_time: std::time::Duration,
+    blocks_actually_processed: u64,
+    prefetch_hits: u64,
+    prefetch_misses: u64,
+    total_blocks_prefetched: u64,
+    failures: usize,
+}
+
+impl RunStatistics {
+    fn new() -> Self {
+        Self {
+            total_block_time: std::time::Duration::ZERO,
+            total_overhead_time: std::time::Duration::ZERO,
+            total_prefetch_time: std::time::Duration::ZERO,
+            blocks_actually_processed: 0,
+            prefetch_hits: 0,
+            prefetch_misses: 0,
+            total_blocks_prefetched: 0,
+            failures: 0,
+        }
+    }
+}
+
+fn prefetch_next_batch(
+    next_block_to_prefetch: &mut u64,
+    end_block: u64,
+    db: &Database,
+    endpoint: &str,
+    prefetch_cache: &mut std::collections::HashMap<u64, BlockTraces>,
+    total_prefetch_time: &mut std::time::Duration,
+    total_blocks_prefetched: &mut u64,
+) -> Result<()> {
+    if prefetch_cache.is_empty() && *next_block_to_prefetch <= end_block {
+        let prefetch_timing_start = Instant::now();
+        let prefetch_range_end = (*next_block_to_prefetch + PREFETCH_SIZE as u64 - 1).min(end_block);
+        
+        let prefetch_blocks: Vec<u64> = (*next_block_to_prefetch..=prefetch_range_end)
+            .filter(|&block_num| {
+                db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
+            })
+            .collect();
+        
+        if !prefetch_blocks.is_empty() {
+            debug!("Prefetching {} blocks ({} to {})", 
+                prefetch_blocks.len(), 
+                prefetch_blocks[0], 
+                prefetch_blocks.last().unwrap()
+            );
+            
+            match fetch_block_traces_batch(&prefetch_blocks, db, endpoint) {
+                std::result::Result::Ok(batch_results) => {
+                    let prefetched_count = batch_results.len() as u64;
+                    *total_blocks_prefetched += prefetched_count;
+                    prefetch_cache.extend(batch_results);
+                    *next_block_to_prefetch = prefetch_range_end + 1;
+                    
+                    let prefetch_time = prefetch_timing_start.elapsed();
+                    *total_prefetch_time += prefetch_time;
+                    debug!("Prefetched {} blocks in {:.2}ms ({:.2}ms per block)", 
+                        prefetched_count,
+                        prefetch_time.as_secs_f64() * 1000.0,
+                        prefetch_time.as_secs_f64() * 1000.0 / prefetched_count as f64
+                    );
+                }
+                std::result::Result::Err(e) => {
+                    warn!("Failed to prefetch: {}, will fetch individually if needed", e);
+                    *next_block_to_prefetch += 1;
+                }
+            }
+        } else {
+            *next_block_to_prefetch = prefetch_range_end + 1;
+        }
+    }
+    Ok(())
+}
+
+fn try_backup_endpoint(
+    block_number: u64,
+    primary_result: Result<BlockStatus>,
+    backup_endpoint: &str,
+    db: &Database,
+    witness_output_dir: Option<String>,
+    persist_all: bool,
+    chain_id: u64,
+    single_tx: Option<u64>,
+    gpu_state: &mut Option<&mut GpuSharedState>,
+    only_forward: bool,
+    profile: Option<String>,
+    total_block_time: &mut std::time::Duration,
+) -> Result<BlockStatus> {
+    if let std::result::Result::Ok(BlockStatus::Success) = primary_result {
+        return primary_result;
+    }
+    
+    warn!("Block {block_number} failed with primary endpoint. Retrying with backup endpoint...");
+    
+    let backup_traces_result = {
+        let rpc_start = Instant::now();
+        match rpc::get_all_block_traces(backup_endpoint, block_number)
+            .context(format!("Failed to fetch block traces from backup endpoint for {block_number}"))
+        {
+            std::result::Result::Ok((block, prestate, diff, receipts, call)) => {
+                let total_rpc_time = rpc_start.elapsed();
+                debug!("RPC call for block {} from backup endpoint (batched): total={:.2}ms",
+                    block_number,
+                    total_rpc_time.as_secs_f64() * 1000.0
+                );
+                std::result::Result::Ok(BlockTraces {
+                    block,
+                    prestate,
+                    diff,
+                    receipts,
+                    call,
+                })
+            }
+            std::result::Result::Err(e) => std::result::Result::Err(e),
+        }
+    };
+    
+    match backup_traces_result {
+        std::result::Result::Ok(backup_traces) => {
+            let backup_block_start = Instant::now();
+            let backup_result = run_block_with_prefetch(
+                block_number,
+                db,
+                backup_endpoint,
+                witness_output_dir,
+                persist_all,
+                chain_id,
+                single_tx,
+                gpu_state,
+                only_forward,
+                profile,
+                backup_traces,
+            );
+            let backup_block_time = backup_block_start.elapsed();
+            *total_block_time += backup_block_time;
+            
+            match backup_result {
+                std::result::Result::Ok(BlockStatus::Success) => {
+                    info!("Block {block_number} succeeded with backup endpoint");
+                    std::result::Result::Ok(BlockStatus::Success)
+                }
+                std::result::Result::Ok(BlockStatus::Error(backup_e)) => {
+                    warn!("Block {block_number} also failed with backup endpoint: {backup_e:?}");
+                    std::result::Result::Ok(BlockStatus::Error(backup_e))
+                }
+                std::result::Result::Err(backup_e) => {
+                    warn!("Block {block_number} also failed with backup endpoint: {backup_e:?}");
+                    std::result::Result::Err(backup_e)
+                }
+            }
+        }
+        std::result::Result::Err(fetch_err) => {
+            error!("Failed to fetch traces from backup endpoint for block {block_number}: {fetch_err:?}");
+            primary_result
+        }
+    }
+}
+
+fn handle_block_result(
+    result: Result<BlockStatus>,
+    block_number: u64,
+    chain_id: u64,
+    webhook: Option<&String>,
+    stats: &mut RunStatistics,
+) -> Result<()> {
+    match result {
+        std::result::Result::Ok(BlockStatus::Success) => {
+            stats.blocks_actually_processed += 1;
+        }
+        std::result::Result::Ok(BlockStatus::Error(e)) => {
+            stats.failures += 1;
+            let webhook_start = Instant::now();
+            if let Some(webhook) = webhook {
+                let msg = format!(":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed with: {e:?}");
+                send_slack(webhook, &msg)?;
+            }
+            stats.total_overhead_time += webhook_start.elapsed();
+            
+            if stats.failures == MAX_FAILURES {
+                error!("Reached max number of failures");
+                panic!()
+            }
+        }
+        std::result::Result::Err(e) => {
+            stats.failures += 1;
+            error!("Block {block_number} failed with error: {e:?}");
+            if stats.failures == MAX_FAILURES {
+                error!("Reached max number of failures");
+                panic!()
+            }
+        }
+    }
+    Ok(())
+}
+
+fn log_run_statistics(
+    start_block: u64,
+    end_block: u64,
+    chain_id: u64,
+    init_time: std::time::Duration,
+    total_time: std::time::Duration,
+    stats: &RunStatistics,
+) {
+    let blocks_in_range = (end_block - start_block + 1) as f64;
+    let total_overhead_other = total_time
+        .saturating_sub(init_time)
+        .saturating_sub(stats.total_block_time)
+        .saturating_sub(stats.total_overhead_time)
+        .saturating_sub(stats.total_prefetch_time);
+    
+    info!("=== Live Run Completed ===");
+    info!("Blocks in range: {} ({} to {})", blocks_in_range as u64, start_block, end_block);
+    info!("Blocks actually processed: {}", stats.blocks_actually_processed);
+    info!("Blocks skipped: {}", blocks_in_range as u64 - stats.blocks_actually_processed);
+    info!("Failures: {}", stats.failures);
+    info!("");
+    info!("=== Timing Breakdown ===");
+    info!("  Initialization:      {:6.2}ms ({:5.1}%)", init_time.as_secs_f64() * 1000.0, init_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+    if stats.blocks_actually_processed > 0 {
+        info!("  Block execution:      {:6.2}ms ({:5.1}%)", stats.total_block_time.as_secs_f64() * 1000.0, stats.total_block_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", stats.total_overhead_time.as_secs_f64() * 1000.0, stats.total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        info!("    (webhooks, error handling)");
+        if stats.total_prefetch_time.as_secs_f64() > 0.0 {
+            info!("  Prefetching:          {:6.2}ms ({:5.1}%)", stats.total_prefetch_time.as_secs_f64() * 1000.0, stats.total_prefetch_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+            info!("    Blocks prefetched: {} (avg {:.2}ms per block)", 
+                stats.total_blocks_prefetched,
+                stats.total_prefetch_time.as_secs_f64() * 1000.0 / stats.total_blocks_prefetched.max(1) as f64
+            );
+        }
+        info!("  Other overhead:      {:6.2}ms ({:5.1}%)", total_overhead_other.as_secs_f64() * 1000.0, total_overhead_other.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        info!("  Total:               {:6.2}ms ({:5.1}%)", total_time.as_secs_f64() * 1000.0, 100.0);
+        info!("");
+        let avg_time_per_block = stats.total_block_time.as_secs_f64() / stats.blocks_actually_processed as f64;
+        let avg_total_per_block = total_time.as_secs_f64() / stats.blocks_actually_processed as f64;
+        info!("=== Per Block Averages ===");
+        info!("  Execution time:      {:.2}ms", avg_time_per_block * 1000.0);
+        info!("  Total time (w/ overhead): {:.2}ms", avg_total_per_block * 1000.0);
+        info!("  Blocks per second:  {:.2}", stats.blocks_actually_processed as f64 / total_time.as_secs_f64());
+        if stats.prefetch_hits + stats.prefetch_misses > 0 {
+            let prefetch_hit_rate = stats.prefetch_hits as f64 / (stats.prefetch_hits + stats.prefetch_misses) as f64 * 100.0;
+            info!("=== Prefetch Statistics ===");
+            info!("  Prefetch hits:       {} ({:.1}%)", stats.prefetch_hits, prefetch_hit_rate);
+            info!("  Prefetch misses:     {} ({:.1}%)", stats.prefetch_misses, 100.0 - prefetch_hit_rate);
+            info!("  Total blocks prefetched: {}", stats.total_blocks_prefetched);
+        }
+    }
+    info!("==========================");
+}
+
 pub fn live_run(
     start_block: u64,
     end_block: u64,
@@ -671,63 +925,21 @@ pub fn live_run(
     #[cfg(not(feature = "gpu"))]
     let gpu_state: &mut Option<&mut GpuSharedState> = &mut None;
 
-    let mut total_block_time = std::time::Duration::ZERO; // Total block execution time
-    let mut total_overhead_time = std::time::Duration::ZERO; // Per-block overhead (webhooks, etc.)
-    let mut total_prefetch_time = std::time::Duration::ZERO;
-    let mut blocks_actually_processed = 0u64;
-    let mut prefetch_hits = 0u64;
-    let mut prefetch_misses = 0u64;
-    let mut total_blocks_prefetched = 0u64;
-    
+    let mut stats = RunStatistics::new();
     let mut prefetch_cache = std::collections::HashMap::<u64, BlockTraces>::new();
     let mut next_block_to_prefetch = start_block;
     
     for n in start_block..=end_block {
-        // Prefetch next batch if cache is empty and we haven't reached end_block
-        // Prefetch PREFETCH_SIZE blocks at a time (PREFETCH_SIZE * 5 RPC calls = 40 RPC calls, under 50 req/s limit)
-        if prefetch_cache.is_empty() && next_block_to_prefetch <= end_block {
-            let prefetch_timing_start = Instant::now();
-            let prefetch_range_end = (next_block_to_prefetch + PREFETCH_SIZE as u64 - 1).min(end_block);
-            
-            let prefetch_blocks: Vec<u64> = (next_block_to_prefetch..=prefetch_range_end)
-                .filter(|&block_num| {
-                    db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
-                })
-                .collect();
-            
-            if !prefetch_blocks.is_empty() {
-                debug!("Prefetching {} blocks ({} to {})", 
-                    prefetch_blocks.len(), 
-                    prefetch_blocks[0], 
-                    prefetch_blocks.last().unwrap()
-                );
-                
-                match fetch_block_traces_batch(&prefetch_blocks, &db, &endpoint) {
-                    std::result::Result::Ok(batch_results) => {
-                        let prefetched_count = batch_results.len() as u64;
-                        total_blocks_prefetched += prefetched_count;
-                        prefetch_cache.extend(batch_results);
-                        next_block_to_prefetch = prefetch_range_end + 1;
-                        
-                        let prefetch_time = prefetch_timing_start.elapsed();
-                        total_prefetch_time += prefetch_time;
-                        debug!("Prefetched {} blocks in {:.2}ms ({:.2}ms per block)", 
-                            prefetched_count,
-                            prefetch_time.as_secs_f64() * 1000.0,
-                            prefetch_time.as_secs_f64() * 1000.0 / prefetched_count as f64
-                        );
-                    }
-                    std::result::Result::Err(e) => {
-                        warn!("Failed to prefetch: {}, will fetch individually if needed", e);
-                        // On error, skip to next block to avoid infinite loop
-                        next_block_to_prefetch += 1;
-                    }
-                }
-            } else {
-                // All blocks in range are already in DB, skip to next batch
-                next_block_to_prefetch = prefetch_range_end + 1;
-            }
-        }
+        // Prefetch next batch if cache is empty
+        prefetch_next_batch(
+            &mut next_block_to_prefetch,
+            end_block,
+            &db,
+            &endpoint,
+            &mut prefetch_cache,
+            &mut stats.total_prefetch_time,
+            &mut stats.total_blocks_prefetched,
+        )?;
         
         // Check if we should skip this block
         if let std::result::Result::Ok(Some(status)) = db.get_block_status(n) {
@@ -739,10 +951,10 @@ pub fn live_run(
         
         // Get traces from prefetch cache or fetch if not available
         let block_traces = if let Some(traces) = prefetch_cache.remove(&n) {
-            prefetch_hits += 1;
+            stats.prefetch_hits += 1;
             traces
         } else {
-            prefetch_misses += 1;
+            stats.prefetch_misses += 1;
             match fetch_block_traces(n, &db, &endpoint) {
                 std::result::Result::Ok(traces) => traces,
                 std::result::Result::Err(e) => {
@@ -768,155 +980,34 @@ pub fn live_run(
             block_traces,
         );
         let block_time = block_start.elapsed();
-        total_block_time += block_time;
+        stats.total_block_time += block_time;
         
-        // If execution failed and backup endpoint is available, retry with backup endpoint traces
-        let result = if let std::result::Result::Ok(BlockStatus::Success) = primary_result {
-            primary_result
+        // Try backup endpoint if primary execution failed
+        let result = if let Some(backup) = backup_endpoint.as_ref() {
+            try_backup_endpoint(
+                n,
+                primary_result,
+                backup,
+                &db,
+                witness_output_dir.clone(),
+                persist_all,
+                chain_id,
+                single_tx,
+                gpu_state,
+                only_forward,
+                profile.clone(),
+                &mut stats.total_block_time,
+            )
         } else {
-            // Execution failed - try backup endpoint if available
-            if let Some(backup) = backup_endpoint.as_ref() {
-                warn!("Block {n} failed with primary endpoint. Retrying with backup endpoint...");
-                
-                // Fetch traces from backup endpoint
-                let backup_traces_result = {
-                    let rpc_start = Instant::now();
-                    let (block, prestate, diff, receipts, call) = rpc::get_all_block_traces(backup, n)
-                        .context(format!("Failed to fetch block traces from backup endpoint for {n}"))?;
-                    let total_rpc_time = rpc_start.elapsed();
-                    debug!("RPC call for block {} from backup endpoint (batched): total={:.2}ms",
-                        n,
-                        total_rpc_time.as_secs_f64() * 1000.0
-                    );
-                    Ok(BlockTraces {
-                        block,
-                        prestate,
-                        diff,
-                        receipts,
-                        call,
-                    })
-                };
-                
-                match backup_traces_result {
-                    std::result::Result::Ok(backup_traces) => {
-                        let backup_block_start = Instant::now();
-                        let backup_result = run_block_with_prefetch(
-                            n,
-                            &db,
-                            backup,
-                            witness_output_dir.clone(),
-                            persist_all,
-                            chain_id,
-                            single_tx,
-                            gpu_state,
-                            only_forward,
-                            profile.clone(),
-                            backup_traces,
-                        );
-                        let backup_block_time = backup_block_start.elapsed();
-                        total_block_time += backup_block_time;
-                        
-                        match backup_result {
-                            std::result::Result::Ok(BlockStatus::Success) => {
-                                info!("Block {n} succeeded with backup endpoint");
-                                std::result::Result::Ok(BlockStatus::Success)
-                            }
-                            std::result::Result::Ok(BlockStatus::Error(backup_e)) => {
-                                warn!("Block {n} also failed with backup endpoint: {backup_e:?}");
-                                std::result::Result::Ok(BlockStatus::Error(backup_e))
-                            }
-                            std::result::Result::Err(backup_e) => {
-                                warn!("Block {n} also failed with backup endpoint: {backup_e:?}");
-                                std::result::Result::Err(backup_e)
-                            }
-                        }
-                    }
-                    std::result::Result::Err(fetch_err) => {
-                        error!("Failed to fetch traces from backup endpoint for block {n}: {fetch_err:?}");
-                        // Return original error
-                        primary_result
-                    }
-                }
-            } else {
-                // No backup endpoint, return original error
-                primary_result
-            }
+            primary_result
         };
         
-        match result {
-            std::result::Result::Ok(BlockStatus::Success) => {
-                blocks_actually_processed += 1;
-            }
-            std::result::Result::Ok(BlockStatus::Error(e)) => {
-                failures += 1;
-                let webhook_start = Instant::now();
-                if let Some(webhook) = webhook.as_ref() {
-                    let msg = format!(":rotating_light: eth_runner: Block {n} on chain with id {chain_id} failed with: {e:?}");
-                    send_slack(webhook, &msg)?;
-                }
-                total_overhead_time += webhook_start.elapsed();
-                
-                if failures == MAX_FAILURES {
-                    error!("Reached max number of failures");
-                    panic!()
-                }
-            }
-            std::result::Result::Err(e) => {
-                failures += 1;
-                error!("Block {n} failed with error: {e:?}");
-                if failures == MAX_FAILURES {
-                    error!("Reached max number of failures");
-                    panic!()
-                }
-            }
-        }
+        // Handle result (update stats, send webhooks, check failures)
+        handle_block_result(result, n, chain_id, webhook.as_ref(), &mut stats)?;
     }
     
     let total_time = run_start.elapsed();
-    let blocks_in_range = (end_block - start_block + 1) as f64;
-    let total_overhead_other = total_time
-        .saturating_sub(init_time)
-        .saturating_sub(total_block_time)
-        .saturating_sub(total_overhead_time)
-        .saturating_sub(total_prefetch_time);
-    
-    info!("=== Live Run Completed ===");
-    info!("Blocks in range: {} ({} to {})", blocks_in_range as u64, start_block, end_block);
-    info!("Blocks actually processed: {}", blocks_actually_processed);
-    info!("Blocks skipped: {}", blocks_in_range as u64 - blocks_actually_processed);
-    info!("Failures: {}", failures);
-    info!("");
-    info!("=== Timing Breakdown ===");
-    info!("  Initialization:      {:6.2}ms ({:5.1}%)", init_time.as_secs_f64() * 1000.0, init_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-    if blocks_actually_processed > 0 {
-        info!("  Block execution:      {:6.2}ms ({:5.1}%)", total_block_time.as_secs_f64() * 1000.0, total_block_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-        info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", total_overhead_time.as_secs_f64() * 1000.0, total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-        info!("    (webhooks, error handling)");
-        if total_prefetch_time.as_secs_f64() > 0.0 {
-            info!("  Prefetching:          {:6.2}ms ({:5.1}%)", total_prefetch_time.as_secs_f64() * 1000.0, total_prefetch_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-            info!("    Blocks prefetched: {} (avg {:.2}ms per block)", 
-                total_blocks_prefetched,
-                total_prefetch_time.as_secs_f64() * 1000.0 / total_blocks_prefetched.max(1) as f64
-            );
-        }
-        info!("  Other overhead:      {:6.2}ms ({:5.1}%)", total_overhead_other.as_secs_f64() * 1000.0, total_overhead_other.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-        info!("  Total:               {:6.2}ms ({:5.1}%)", total_time.as_secs_f64() * 1000.0, 100.0);
-        info!("");
-        let avg_time_per_block = total_block_time.as_secs_f64() / blocks_actually_processed as f64;
-        let avg_total_per_block = total_time.as_secs_f64() / blocks_actually_processed as f64;
-        info!("=== Per Block Averages ===");
-        info!("  Execution time:      {:.2}ms", avg_time_per_block * 1000.0);
-        info!("  Total time (w/ overhead): {:.2}ms", avg_total_per_block * 1000.0);
-        info!("  Blocks per second:  {:.2}", blocks_actually_processed as f64 / total_time.as_secs_f64());
-        if prefetch_hits + prefetch_misses > 0 {
-            let prefetch_hit_rate = prefetch_hits as f64 / (prefetch_hits + prefetch_misses) as f64 * 100.0;
-            info!("=== Prefetch Statistics ===");
-            info!("  Prefetch hits:       {} ({:.1}%)", prefetch_hits, prefetch_hit_rate);
-            info!("  Prefetch misses:     {} ({:.1}%)", prefetch_misses, 100.0 - prefetch_hit_rate);
-            info!("  Total blocks prefetched: {}", total_blocks_prefetched);
-        }
-    }
-    info!("==========================");
+    log_run_statistics(start_block, end_block, chain_id, init_time, total_time, &stats);
     
     if let Some(webhook) = webhook.as_ref() {
         let msg = format!(":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!");
