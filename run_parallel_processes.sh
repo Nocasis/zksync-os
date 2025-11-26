@@ -79,6 +79,14 @@ for i in $(seq 1 $NUM_PROCESSES); do
         # Build command with optional webhook and REFETCH_TRACES
         CMD="RUST_LOG=eth_runner=debug"
         
+        # Add HOSTNAME if set
+        if [ ! -z "$HOSTNAME" ]; then
+            CMD="$CMD HOSTNAME=\"$HOSTNAME\""
+        fi
+        
+        # Add process number
+        CMD="$CMD PROC_NUM=$i"
+        
         # Add REFETCH_TRACES if set
         if [ ! -z "$REFETCH_TRACES" ]; then
             CMD="$CMD REFETCH_TRACES=$REFETCH_TRACES"

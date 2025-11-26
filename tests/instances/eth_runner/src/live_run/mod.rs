@@ -22,9 +22,13 @@ use reqwest::blocking::Client;
 use serde_json::json;
 use std::backtrace::Backtrace;
 use std::panic;
+use std::sync::atomic::{AtomicU64, Ordering};
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
 const PREFETCH_SIZE: usize = 4; // Prefetch size (8 * 5 = 40 RPC calls, under 50 req/s limit)
+
+// Global variable to track current block number for panic handler
+static CURRENT_BLOCK_NUMBER: AtomicU64 = AtomicU64::new(0);
 
 fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
@@ -37,12 +41,53 @@ fn send_slack(webhook: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+fn get_machine_info() -> String {
+    let mut info = Vec::new();
+    
+    // Hostname from environment variable
+    if let std::result::Result::Ok(hostname) = std::env::var("HOSTNAME") {
+        info.push(format!("Hostname: {}", hostname));
+    }
+    
+    // Process number from environment variable
+    if let std::result::Result::Ok(proc_num) = std::env::var("PROC_NUM") {
+        info.push(format!("Process Number: {}", proc_num));
+    }
+    
+    // OS info
+    info.push(format!("OS: {} {}", std::env::consts::OS, std::env::consts::ARCH));
+    
+    // Process info
+    info.push(format!("PID: {}", std::process::id()));
+    
+    info.join("\n")
+}
+
 fn install_panic_hook(webhook: String) {
     panic::set_hook(Box::new(move |info| {
+        let current_block = CURRENT_BLOCK_NUMBER.load(Ordering::Relaxed);
+        let machine_info = get_machine_info();
+        let backtrace = Backtrace::force_capture();
+        
         let msg = format!(
-            ":rotating_light: eth-runner panicked: {info}\n{}",
-            Backtrace::force_capture()
+            ":rotating_light: eth-runner panicked\n\
+            \n\
+            **Block Number:** {}\n\
+            \n\
+            **Machine Info:**\n\
+            {}\n\
+            \n\
+            **Panic Info:**\n\
+            {}\n\
+            \n\
+            **Backtrace:**\n\
+            {}",
+            if current_block == 0 { "Unknown".to_string() } else { current_block.to_string() },
+            machine_info,
+            info,
+            backtrace
         );
+        
         let _ = Client::new()
             .post(&webhook)
             .json(&json!({ "text": msg }))
@@ -930,6 +975,9 @@ pub fn live_run(
     let mut next_block_to_prefetch = start_block;
     
     for n in start_block..=end_block {
+        // Update current block number for panic handler
+        CURRENT_BLOCK_NUMBER.store(n, Ordering::Relaxed);
+        
         // Prefetch next batch if cache is empty
         prefetch_next_batch(
             &mut next_block_to_prefetch,
