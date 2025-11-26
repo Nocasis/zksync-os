@@ -19,7 +19,6 @@ use crate::{
     receipts::TransactionReceipt,
 };
 use reqwest::blocking::Client;
-use serde_json::json;
 use std::backtrace::Backtrace;
 use std::panic;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,7 +62,7 @@ fn get_machine_info() -> String {
     info.join("\n")
 }
 
-fn install_panic_hook(webhook: String) {
+fn install_panic_hook(webhook: Option<String>) {
     panic::set_hook(Box::new(move |info| {
         let current_block = CURRENT_BLOCK_NUMBER.load(Ordering::Relaxed);
         let machine_info = get_machine_info();
@@ -88,11 +87,13 @@ fn install_panic_hook(webhook: String) {
             backtrace
         );
         
-        let _ = Client::new()
-            .post(&webhook)
-            .json(&json!({ "text": msg }))
-            .send();
-        eprintln!("{msg}");
+        // Always print to stderr
+        info!("{msg}");
+        
+        // Only send to Slack if webhook is provided
+        if let Some(webhook_url) = &webhook {
+            let _ = send_slack(webhook_url, &msg);
+        }
     }));
 }
 
@@ -840,7 +841,19 @@ fn handle_block_result(
             stats.failures += 1;
             let webhook_start = Instant::now();
             if let Some(webhook) = webhook {
-                let msg = format!(":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed with: {e:?}");
+                let machine_info = get_machine_info();
+                let msg = format!(
+                    ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed\n\
+                    \n\
+                    **Block Number:** {block_number}\n\
+                    **Chain ID:** {chain_id}\n\
+                    \n\
+                    **Machine Info:**\n\
+                    {machine_info}\n\
+                    \n\
+                    **Error:**\n\
+                    {e:?}"
+                );
                 send_slack(webhook, &msg)?;
             }
             stats.total_overhead_time += webhook_start.elapsed();
@@ -932,9 +945,8 @@ pub fn live_run(
 ) -> Result<()> {
     let run_start = Instant::now();
     
-    if let Some(webhook) = webhook.clone() {
-        install_panic_hook(webhook);
-    }
+    // Install panic hook (with or without webhook)
+    install_panic_hook(webhook.clone());
     
     let init_start = Instant::now();
     let db = Database::init(db_path)?;
@@ -1058,7 +1070,18 @@ pub fn live_run(
     log_run_statistics(start_block, end_block, chain_id, init_time, total_time, &stats);
     
     if let Some(webhook) = webhook.as_ref() {
-        let msg = format!(":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!");
+        let machine_info = get_machine_info();
+        let msg = format!(
+            ":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!\n\
+            \n\
+            **Block Range:** {start_block} to {end_block}\n\
+            **Chain ID:** {chain_id}\n\
+            **Blocks Processed:** {}\n\
+            \n\
+            **Machine Info:**\n\
+            {machine_info}",
+            stats.blocks_actually_processed
+        );
         send_slack(webhook, &msg)?
     }
     Ok(())
