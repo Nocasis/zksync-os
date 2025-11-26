@@ -54,9 +54,6 @@ fn get_machine_info() -> String {
         info.push(format!("Process Number: {}", proc_num));
     }
     
-    // OS info
-    info.push(format!("OS: {} {}", std::env::consts::OS, std::env::consts::ARCH));
-    
     // Process info
     info.push(format!("PID: {}", std::process::id()));
     
@@ -854,6 +851,105 @@ fn try_backup_endpoint(
     }
 }
 
+fn fetch_block_traces_with_backup(
+    block_number: u64,
+    db: &Database,
+    primary_endpoint: &str,
+    backup_endpoint: Option<&String>,
+    chain_id: u64,
+    webhook: Option<&String>,
+    stats: &mut RunStatistics,
+) -> Result<Option<BlockTraces>> {
+    // Try primary endpoint first
+    match fetch_block_traces(block_number, db, primary_endpoint) {
+        std::result::Result::Ok(traces) => Ok(Some(traces)),
+        std::result::Result::Err(primary_err) => {
+            error!("Failed to fetch traces for block {block_number} from primary endpoint: {primary_err:?}");
+            
+            // Try backup endpoint if available
+            let traces_result = if let Some(backup) = backup_endpoint {
+                warn!("Trying backup endpoint for block {block_number} trace fetch...");
+                match rpc::get_all_block_traces(backup, block_number)
+                    .context(format!("Failed to fetch block traces from backup endpoint for {block_number}"))
+                {
+                    std::result::Result::Ok((block, prestate, diff, receipts, call)) => {
+                        info!("Successfully fetched traces for block {block_number} from backup endpoint");
+                        std::result::Result::Ok(BlockTraces {
+                            block,
+                            prestate,
+                            diff,
+                            receipts,
+                            call,
+                        })
+                    }
+                    std::result::Result::Err(backup_err) => {
+                        error!("Failed to fetch traces for block {block_number} from backup endpoint: {backup_err:?}");
+                        std::result::Result::Err(backup_err)
+                    }
+                }
+            } else {
+                std::result::Result::Err(primary_err)
+            };
+            
+            match traces_result {
+                std::result::Result::Ok(traces) => Ok(Some(traces)),
+                std::result::Result::Err(e) => {
+                    // Both endpoints failed - send webhook notification and skip block
+                    stats.blocks_skipped_trace_fetch += 1;
+                    if let Some(webhook) = webhook {
+                        let machine_info = get_machine_info();
+                        let msg = format!(
+                            ":rotating_light: eth_runner: Failed to fetch traces for block {block_number} on chain with id {chain_id}\n\
+                            \n\
+                            *Block Number:* {block_number}\n\
+                            *Chain ID:* {chain_id}\n\
+                            \n\
+                            *Machine Info:*\n\
+                            {machine_info}\n\
+                            \n\
+                            *Error:*\n\
+                            {e:?}"
+                        );
+                        if let Err(webhook_err) = send_slack(webhook, &msg) {
+                            warn!("Failed to send webhook notification: {}", webhook_err);
+                        }
+                    }
+                    
+                    // Even if we can't fetch traces, we need to save the block hash
+                    // so future blocks can reference it. Try to fetch just the hash.
+                    match db.get_block_hash(block_number) {
+                        std::result::Result::Ok(Some(_)) => {
+                            // Hash already exists, nothing to do
+                        }
+                        std::result::Result::Ok(None) => {
+                            // Hash doesn't exist, try to fetch it
+                            match rpc::get_block_hash(primary_endpoint, block_number) {
+                                std::result::Result::Ok(hash) => {
+                                    if let Err(hash_err) = db.set_block_hash(block_number, U256::from_be_bytes(hash.0)) {
+                                        warn!("Failed to save block hash for {block_number}: {hash_err}");
+                                    } else {
+                                        if let Err(flush_err) = db.flush() {
+                                            warn!("Failed to flush DB after saving block hash for {block_number}: {flush_err}");
+                                        }
+                                        debug!("Saved block hash for block {block_number}");
+                                    }
+                                }
+                                std::result::Result::Err(hash_err) => {
+                                    warn!("Failed to fetch block hash for {block_number}: {hash_err}");
+                                }
+                            }
+                        }
+                        std::result::Result::Err(_) => {
+                            // If get_block_hash returns an error, we just skip saving the hash
+                        }
+                    }
+                    Ok(None) // Return None to indicate block should be skipped
+                }
+            }
+        }
+    }
+}
+
 fn handle_block_result(
     result: Result<BlockStatus>,
     block_number: u64,
@@ -1066,80 +1162,17 @@ pub fn live_run(
             traces
         } else {
             stats.prefetch_misses += 1;
-            match fetch_block_traces(n, &db, &endpoint) {
-                std::result::Result::Ok(traces) => traces,
-                std::result::Result::Err(primary_err) => {
-                    error!("Failed to fetch traces for block {n} from primary endpoint: {primary_err:?}");
-                    
-                    // Try backup endpoint if available
-                    let traces_result = if let Some(backup) = backup_endpoint.as_ref() {
-                        warn!("Trying backup endpoint for block {n} trace fetch...");
-                        match rpc::get_all_block_traces(backup, n)
-                            .context(format!("Failed to fetch block traces from backup endpoint for {n}"))
-                        {
-                            std::result::Result::Ok((block, prestate, diff, receipts, call)) => {
-                                info!("Successfully fetched traces for block {n} from backup endpoint");
-                                std::result::Result::Ok(BlockTraces {
-                                    block,
-                                    prestate,
-                                    diff,
-                                    receipts,
-                                    call,
-                                })
-                            }
-                            std::result::Result::Err(backup_err) => {
-                                error!("Failed to fetch traces for block {n} from backup endpoint: {backup_err:?}");
-                                std::result::Result::Err(backup_err)
-                            }
-                        }
-                    } else {
-                        std::result::Result::Err(primary_err)
-                    };
-                    
-                    match traces_result {
-                        std::result::Result::Ok(traces) => traces,
-                        std::result::Result::Err(e) => {
-                            // Both endpoints failed - send webhook notification and skip block
-                            stats.blocks_skipped_trace_fetch += 1;
-                            if let Some(webhook) = webhook.as_ref() {
-                                let machine_info = get_machine_info();
-                                let msg = format!(
-                                    ":warning: eth_runner: Failed to fetch traces for block {n} on chain with id {chain_id}\n\
-                                    \n\
-                                    *Block Number:* {n}\n\
-                                    *Chain ID:* {chain_id}\n\
-                                    \n\
-                                    *Machine Info:*\n\
-                                    {machine_info}\n\
-                                    \n\
-                                    *Error:*\n\
-                                    {e:?}"
-                                );
-                                if let Err(webhook_err) = send_slack(webhook, &msg) {
-                                    warn!("Failed to send webhook notification: {}", webhook_err);
-                                }
-                            }
-                            
-                            // Even if we can't fetch traces, we need to save the block hash
-                            // so future blocks can reference it. Try to fetch just the hash.
-                            if db.get_block_hash(n)?.is_none() {
-                                match rpc::get_block_hash(&endpoint, n) {
-                                    std::result::Result::Ok(hash) => {
-                                        if let Err(hash_err) = db.set_block_hash(n, U256::from_be_bytes(hash.0)) {
-                                            warn!("Failed to save block hash for {n}: {hash_err}");
-                                        } else {
-                                            debug!("Saved block hash for block {n}");
-                                        }
-                                    }
-                                    std::result::Result::Err(hash_err) => {
-                                        warn!("Failed to fetch block hash for {n}: {hash_err}");
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                }
+            match fetch_block_traces_with_backup(
+                n,
+                &db,
+                &endpoint,
+                backup_endpoint.as_ref(),
+                chain_id,
+                webhook.as_ref(),
+                &mut stats,
+            )? {
+                Some(traces) => traces,
+                None => continue, // Block skipped due to trace fetch failure
             }
         };
         
