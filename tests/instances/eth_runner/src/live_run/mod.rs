@@ -21,6 +21,7 @@ use crate::{
 use reqwest::blocking::Client;
 use std::backtrace::Backtrace;
 use std::panic;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 const N_PREV_BLOCKS: usize = 256;
 const MAX_FAILURES: usize = 10;
@@ -71,15 +72,15 @@ fn install_panic_hook(webhook: Option<String>) {
         let msg = format!(
             ":rotating_light: eth-runner panicked\n\
             \n\
-            **Block Number:** {}\n\
+            *Block Number:* {}\n\
             \n\
-            **Machine Info:**\n\
+            *Machine Info:*\n\
             {}\n\
             \n\
-            **Panic Info:**\n\
+            *Panic Info:*\n\
             {}\n\
             \n\
-            **Backtrace:**\n\
+            *Backtrace:*\n\
             {}",
             if current_block == 0 { "Unknown".to_string() } else { current_block.to_string() },
             machine_info,
@@ -468,14 +469,37 @@ fn run_block_with_prefetch(
     };
     
     let execution_start = Instant::now();
-    let (output, stats, _prover_input) = chain
-        .run_block_with_extra_stats(
+    
+    // Wrap execution in panic handler to catch panics
+    let execution_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        chain.run_block_with_extra_stats(
             transactions,
             Some(block_context),
             Some(run_config),
             &mut NopTracer::default(),
         )
-        .unwrap();
+    }));
+    
+    let (output, stats, _prover_input) = match execution_result {
+        std::result::Result::Ok(std::result::Result::Ok(result)) => result,
+        std::result::Result::Ok(std::result::Result::Err(e)) => {
+            return Err(anyhow!("Block execution failed: {e:?}"));
+        }
+        std::result::Result::Err(panic_payload) => {
+            // Extract panic message if possible
+            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                format!("Panic occurred (payload type: {:?})", panic_payload.type_id())
+            };
+            
+            error!("Block {block_number} panicked during execution: {panic_msg}");
+            return Err(anyhow!("Block {block_number} panicked during execution: {panic_msg}"));
+        }
+    };
+    
     let execution_time = execution_start.elapsed();
 
     info!("Actual gas used: {}", output.header.gas_used);
@@ -668,6 +692,8 @@ struct RunStatistics {
     total_overhead_time: std::time::Duration,
     total_prefetch_time: std::time::Duration,
     blocks_actually_processed: u64,
+    blocks_skipped_trace_fetch: u64,
+    blocks_skipped_already_succeeded: u64,
     prefetch_hits: u64,
     prefetch_misses: u64,
     total_blocks_prefetched: u64,
@@ -681,6 +707,8 @@ impl RunStatistics {
             total_overhead_time: std::time::Duration::ZERO,
             total_prefetch_time: std::time::Duration::ZERO,
             blocks_actually_processed: 0,
+            blocks_skipped_trace_fetch: 0,
+            blocks_skipped_already_succeeded: 0,
             prefetch_hits: 0,
             prefetch_misses: 0,
             total_blocks_prefetched: 0,
@@ -845,13 +873,13 @@ fn handle_block_result(
                 let msg = format!(
                     ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed\n\
                     \n\
-                    **Block Number:** {block_number}\n\
-                    **Chain ID:** {chain_id}\n\
+                    *Block Number:* {block_number}\n\
+                    *Chain ID:* {chain_id}\n\
                     \n\
-                    **Machine Info:**\n\
+                    *Machine Info:*\n\
                     {machine_info}\n\
                     \n\
-                    **Error:**\n\
+                    *Error:*\n\
                     {e:?}"
                 );
                 send_slack(webhook, &msg)?;
@@ -859,16 +887,35 @@ fn handle_block_result(
             stats.total_overhead_time += webhook_start.elapsed();
             
             if stats.failures == MAX_FAILURES {
-                error!("Reached max number of failures");
-                panic!()
+                error!("Reached max number of failures ({MAX_FAILURES}), stopping execution");
+                return Err(anyhow!("Reached max number of failures ({MAX_FAILURES})"));
             }
         }
         std::result::Result::Err(e) => {
             stats.failures += 1;
             error!("Block {block_number} failed with error: {e:?}");
+            let webhook_start = Instant::now();
+            if let Some(webhook) = webhook {
+                let machine_info = get_machine_info();
+                let msg = format!(
+                    ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed with execution error\n\
+                    \n\
+                    *Block Number:* {block_number}\n\
+                    *Chain ID:* {chain_id}\n\
+                    \n\
+                    *Machine Info:*\n\
+                    {machine_info}\n\
+                    \n\
+                    *Error:*\n\
+                    {e:?}"
+                );
+                send_slack(webhook, &msg)?;
+            }
+            stats.total_overhead_time += webhook_start.elapsed();
+            
             if stats.failures == MAX_FAILURES {
-                error!("Reached max number of failures");
-                panic!()
+                error!("Reached max number of failures ({MAX_FAILURES}), stopping execution");
+                return Err(anyhow!("Reached max number of failures ({MAX_FAILURES})"));
             }
         }
     }
@@ -893,7 +940,9 @@ fn log_run_statistics(
     info!("=== Live Run Completed ===");
     info!("Blocks in range: {} ({} to {})", blocks_in_range as u64, start_block, end_block);
     info!("Blocks actually processed: {}", stats.blocks_actually_processed);
-    info!("Blocks skipped: {}", blocks_in_range as u64 - stats.blocks_actually_processed);
+    info!("Blocks skipped (already succeeded): {}", stats.blocks_skipped_already_succeeded);
+    info!("Blocks skipped (trace fetch failed): {}", stats.blocks_skipped_trace_fetch);
+    info!("Blocks skipped (other): {}", blocks_in_range as u64 - stats.blocks_actually_processed - stats.blocks_skipped_already_succeeded - stats.blocks_skipped_trace_fetch);
     info!("Failures: {}", stats.failures);
     info!("");
     info!("=== Timing Breakdown ===");
@@ -985,6 +1034,7 @@ pub fn live_run(
     let mut stats = RunStatistics::new();
     let mut prefetch_cache = std::collections::HashMap::<u64, BlockTraces>::new();
     let mut next_block_to_prefetch = start_block;
+    let mut stopped_early = false;
     
     for n in start_block..=end_block {
         // Update current block number for panic handler
@@ -1005,6 +1055,7 @@ pub fn live_run(
         if let std::result::Result::Ok(Some(status)) = db.get_block_status(n) {
             if skip_successful && matches!(status, BlockStatus::Success) {
                 debug!("Skipping block {n}, already succeeded");
+                stats.blocks_skipped_already_succeeded += 1;
                 continue;
             }
         }
@@ -1017,9 +1068,77 @@ pub fn live_run(
             stats.prefetch_misses += 1;
             match fetch_block_traces(n, &db, &endpoint) {
                 std::result::Result::Ok(traces) => traces,
-                std::result::Result::Err(e) => {
-                    error!("Failed to fetch traces for block {n}: {e:?}");
-                    continue;
+                std::result::Result::Err(primary_err) => {
+                    error!("Failed to fetch traces for block {n} from primary endpoint: {primary_err:?}");
+                    
+                    // Try backup endpoint if available
+                    let traces_result = if let Some(backup) = backup_endpoint.as_ref() {
+                        warn!("Trying backup endpoint for block {n} trace fetch...");
+                        match rpc::get_all_block_traces(backup, n)
+                            .context(format!("Failed to fetch block traces from backup endpoint for {n}"))
+                        {
+                            std::result::Result::Ok((block, prestate, diff, receipts, call)) => {
+                                info!("Successfully fetched traces for block {n} from backup endpoint");
+                                std::result::Result::Ok(BlockTraces {
+                                    block,
+                                    prestate,
+                                    diff,
+                                    receipts,
+                                    call,
+                                })
+                            }
+                            std::result::Result::Err(backup_err) => {
+                                error!("Failed to fetch traces for block {n} from backup endpoint: {backup_err:?}");
+                                std::result::Result::Err(backup_err)
+                            }
+                        }
+                    } else {
+                        std::result::Result::Err(primary_err)
+                    };
+                    
+                    match traces_result {
+                        std::result::Result::Ok(traces) => traces,
+                        std::result::Result::Err(e) => {
+                            // Both endpoints failed - send webhook notification and skip block
+                            stats.blocks_skipped_trace_fetch += 1;
+                            if let Some(webhook) = webhook.as_ref() {
+                                let machine_info = get_machine_info();
+                                let msg = format!(
+                                    ":warning: eth_runner: Failed to fetch traces for block {n} on chain with id {chain_id}\n\
+                                    \n\
+                                    *Block Number:* {n}\n\
+                                    *Chain ID:* {chain_id}\n\
+                                    \n\
+                                    *Machine Info:*\n\
+                                    {machine_info}\n\
+                                    \n\
+                                    *Error:*\n\
+                                    {e:?}"
+                                );
+                                if let Err(webhook_err) = send_slack(webhook, &msg) {
+                                    warn!("Failed to send webhook notification: {}", webhook_err);
+                                }
+                            }
+                            
+                            // Even if we can't fetch traces, we need to save the block hash
+                            // so future blocks can reference it. Try to fetch just the hash.
+                            if db.get_block_hash(n)?.is_none() {
+                                match rpc::get_block_hash(&endpoint, n) {
+                                    std::result::Result::Ok(hash) => {
+                                        if let Err(hash_err) = db.set_block_hash(n, U256::from_be_bytes(hash.0)) {
+                                            warn!("Failed to save block hash for {n}: {hash_err}");
+                                        } else {
+                                            debug!("Saved block hash for block {n}");
+                                        }
+                                    }
+                                    std::result::Result::Err(hash_err) => {
+                                        warn!("Failed to fetch block hash for {n}: {hash_err}");
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
                 }
             }
         };
@@ -1063,7 +1182,12 @@ pub fn live_run(
         };
         
         // Handle result (update stats, send webhooks, check failures)
-        handle_block_result(result, n, chain_id, webhook.as_ref(), &mut stats)?;
+        // If max failures reached, break out of loop gracefully
+        if let Err(e) = handle_block_result(result, n, chain_id, webhook.as_ref(), &mut stats) {
+            warn!("Stopping execution: {e}");
+            stopped_early = true;
+            break;
+        }
     }
     
     let total_time = run_start.elapsed();
@@ -1071,16 +1195,27 @@ pub fn live_run(
     
     if let Some(webhook) = webhook.as_ref() {
         let machine_info = get_machine_info();
+        let (emoji, status_msg) = if stopped_early {
+            (":rotating_light:", "stopped early due to max failures")
+        } else {
+            (":white_check_mark:", "successfully!")
+        };
         let msg = format!(
-            ":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!\n\
+            "{emoji} eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} {status_msg}\n\
             \n\
-            **Block Range:** {start_block} to {end_block}\n\
-            **Chain ID:** {chain_id}\n\
-            **Blocks Processed:** {}\n\
+            *Block Range:* {start_block} to {end_block}\n\
+            *Chain ID:* {chain_id}\n\
+            *Blocks Processed:* {}\n\
+            *Blocks Skipped (already succeeded):* {}\n\
+            *Blocks Skipped (trace fetch failed):* {}\n\
+            *Failures:* {}\n\
             \n\
-            **Machine Info:**\n\
+            *Machine Info:*\n\
             {machine_info}",
-            stats.blocks_actually_processed
+            stats.blocks_actually_processed,
+            stats.blocks_skipped_already_succeeded,
+            stats.blocks_skipped_trace_fetch,
+            stats.failures
         );
         send_slack(webhook, &msg)?
     }
