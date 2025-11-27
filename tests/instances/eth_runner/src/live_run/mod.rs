@@ -1253,10 +1253,6 @@ pub fn live_run(
         );
         send_slack(webhook, &msg)?
     }
-    if let Some(webhook) = webhook.as_ref() {
-        let msg = format!(":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!");
-        send_slack(webhook, &msg)?
-    }
     Ok(())
 }
 
