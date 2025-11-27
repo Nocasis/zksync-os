@@ -123,5 +123,5 @@ fn fibish_sol() {
         profiler_config: Some(pc),
         ..Default::default()
     };
-    chain.run_block(vec![tx], None, Some(run_config));
+    chain.run_block(vec![tx], None, None, Some(run_config));
 }

@@ -49,7 +49,7 @@ fn run_tx(tx: EncodedTx, basefee: u64, native_price: u64, should_succeed: bool, 
     let output = if simulation {
         chain.simulate_block(transactions, Some(block_context))
     } else {
-        chain.run_block(transactions, Some(block_context), None)
+        chain.run_block(transactions, Some(block_context), None, None)
     };
 
     // Assert all txs succeeded

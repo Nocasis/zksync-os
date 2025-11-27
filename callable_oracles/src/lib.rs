@@ -2,6 +2,7 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 #![feature(array_chunks)]
+#![feature(iter_array_chunks)]
 #![allow(clippy::new_without_default)]
 #![allow(clippy::needless_lifetimes)]
 #![allow(clippy::needless_borrow)]
@@ -18,6 +19,7 @@
 #![allow(clippy::precedence)]
 
 pub mod arithmetic;
+pub mod blob_kzg_commitment;
 pub mod utils;
 
 use zk_ee::{

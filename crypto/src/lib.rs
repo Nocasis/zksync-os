@@ -55,6 +55,20 @@ pub use self::ark_ff::{BigInt, BigInteger};
 #[cfg(any(
     all(target_arch = "riscv32", feature = "bigint_ops"),
     feature = "proving",
+    test
+))]
+pub use crate::ark_ff_delegation::Fp;
+
+#[cfg(not(any(
+    all(target_arch = "riscv32", feature = "bigint_ops"),
+    feature = "proving",
+    test
+)))]
+pub use ark_ff::Fp;
+
+#[cfg(any(
+    all(target_arch = "riscv32", feature = "bigint_ops"),
+    feature = "proving",
     feature = "testing",
     test
 ))]
@@ -94,4 +108,25 @@ pub trait MiniDigest: Sized {
     fn update(&mut self, input: impl AsRef<[u8]>);
     fn finalize(self) -> Self::HashOutput;
     fn finalize_reset(&mut self) -> Self::HashOutput;
+}
+
+///
+/// Parse the byte array as a BE 32-byte BigInt.
+/// If length is less than 32 bytes, it will be left-padded (most significant bytes) with zeroes.
+///
+pub fn parse_u256_be<const N: usize>(input: &[u8; N]) -> BigInt<4> {
+    assert!(N <= 32);
+    // Arkworks has strange format for integer serialization, so we do manually
+    let mut repr = [0u64; 4];
+    let mut repr_iter = repr.iter_mut();
+    let (remainder, chunks) = input.as_rchunks::<8>();
+    for chunk in chunks.iter().rev() {
+        *repr_iter.next().unwrap() = u64::from_be_bytes(*chunk);
+    }
+    if !remainder.is_empty() {
+        let mut buff = [0u8; 8];
+        buff[8 - remainder.len()..].copy_from_slice(remainder);
+        *repr_iter.next().unwrap() = u64::from_be_bytes(buff);
+    }
+    BigInt::new(repr)
 }

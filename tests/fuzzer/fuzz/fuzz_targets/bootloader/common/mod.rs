@@ -212,6 +212,7 @@ pub fn mock_oracle() -> (
                 transactions: VecDeque::new(),
             },
             init_data,
+            None,
             true,
         ),
     )
@@ -272,6 +273,7 @@ pub fn mock_oracle_balance(
                 transactions: VecDeque::new(),
             },
             init_data,
+            None,
             true,
         ),
     )

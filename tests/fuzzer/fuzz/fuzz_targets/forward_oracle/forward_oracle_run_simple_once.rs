@@ -37,5 +37,5 @@ fuzz_target!(|data: &[u8]| {
         B160::from_be_bytes(from.address().into_array()),
         U256::from(1_000_000_000_000_000_u64),
     );
-    chain.run_block(vec![tx], None, None);
+    chain.run_block(vec![tx], None, None, None);
 });

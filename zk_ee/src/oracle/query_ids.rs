@@ -94,3 +94,5 @@ pub const BLOCK_METADATA_QUERY_ID: u32 = BLOCK_SUBSPACE_MASK | 0; // 0x40070000
 
 /// Query to get the data required for state correctness proving (e.g. previous state commitment)
 pub const ZK_PROOF_DATA_INIT_QUERY_ID: u32 = BLOCK_SUBSPACE_MASK | 1; // 0x40070001
+/// Query to get needed DA commitment scheme.
+pub const DA_COMMITMENT_SCHEME_QUERY_ID: u32 = BLOCK_SUBSPACE_MASK | 2; // 0x40070002

@@ -1,5 +1,6 @@
 pub mod cache_record;
 pub mod callee_account_properties;
+pub mod da_commitment_scheme;
 pub mod events_storage;
 pub mod history_counter;
 pub mod history_list;
@@ -14,6 +15,7 @@ pub mod warm_storage_key;
 pub mod warm_storage_value;
 
 pub use self::callee_account_properties::*;
+pub use self::da_commitment_scheme::*;
 pub use self::events_storage::*;
 pub use self::logs_storage::*;
 pub use self::new_preimages_publication_storage::*;

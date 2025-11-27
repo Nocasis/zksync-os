@@ -71,6 +71,7 @@ mod test {
 
     use super::bigint::naive_advisor::NaiveAdvisor;
     use super::*;
+    use num_bigint::BigUint;
 
     fn invoke_precompile_no_prepadding(modulus: &[u8], base: &[u8], exp: &[u8]) -> Vec<u8> {
         super::u256::init();
@@ -285,6 +286,26 @@ mod test {
         let output = invoke_precompile_no_prepadding(&modulus, &base, &exp);
 
         let expected = hex::decode("").unwrap();
+
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_modexp_delegation_add_overflow_regression() {
+        let base = vec![255u8];
+        let exp = vec![48, 255, 128, 209];
+        let modulus = vec![
+            214, 2, 245, 148, 60, 16, 255, 255, 255, 255, 255, 255, 255, 12, 0, 0, 0, 216, 112,
+            144, 135, 112, 173, 239, 243, 255, 194, 78, 78, 1, 46, 10, 211, 128, 5, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let output = invoke_precompile_no_prepadding(&modulus, &base, &exp);
+
+        let base_big = BigUint::from_bytes_be(&base);
+        let exp_big = BigUint::from_bytes_be(&exp);
+        let modulus_big = BigUint::from_bytes_be(&modulus);
+        let expected = base_big.modpow(&exp_big, &modulus_big).to_bytes_be();
 
         assert_eq!(output, expected);
     }

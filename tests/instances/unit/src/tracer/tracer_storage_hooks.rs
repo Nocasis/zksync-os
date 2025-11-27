@@ -156,7 +156,7 @@ fn test_storage_hooks() {
 
     let mut tracer = StorageOperationTracer::new();
 
-    let result = chain.run_block_with_extra_stats(vec![encoded_tx], None, None, &mut tracer);
+    let result = chain.run_block_with_extra_stats(vec![encoded_tx], None, None, None, &mut tracer);
 
     assert!(result.is_ok(), "Block execution should succeed");
     let (block_output, _, _) = result.unwrap();

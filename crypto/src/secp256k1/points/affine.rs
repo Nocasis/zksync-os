@@ -63,6 +63,9 @@ impl AffineConst {
     }
 
     pub(crate) const fn to_jacobian(self) -> JacobianConst {
+        if self.is_infinity() {
+            return JacobianConst::INFINITY;
+        }
         JacobianConst {
             x: self.x,
             y: self.y,
@@ -209,7 +212,10 @@ impl Affine {
         self.infinity = a.infinity;
     }
 
-    pub(crate) const fn to_jacobian(self) -> Jacobian {
+    pub(crate) fn to_jacobian(self) -> Jacobian {
+        if self.is_infinity() {
+            return Jacobian::INFINITY;
+        }
         Jacobian {
             x: self.x,
             y: self.y,
@@ -272,9 +278,6 @@ mod tests {
 
     #[test]
     fn test_set_xo() {
-        #[cfg(feature = "bigint_ops")]
-        crate::secp256k1::init();
-
         let g = Affine::GENERATOR;
         let x = g.x;
         let y_is_odd = false;
@@ -285,9 +288,6 @@ mod tests {
 
     #[test]
     fn jacobian_round_trip() {
-        #[cfg(feature = "bigint_ops")]
-        crate::secp256k1::init();
-
         proptest!(|(x: Affine)| {
             prop_assert_eq!(x.to_jacobian().to_affine(), x);
         });

@@ -3,6 +3,13 @@ use ark_bn254::{G1Affine, G1Projective, Fq, Fr};
 use ark_ec::{AffineRepr,CurveGroup,Group};
 use ark_ff::{PrimeField, BigInteger};
 
+const BN254_P_BE: [u8; 32] = [
+    0x30,0x64,0x4e,0x72,0xe1,0x31,0xa0,0x29,
+    0xb8,0x50,0x45,0xb6,0x81,0x81,0x58,0x5d,
+    0x97,0x81,0x6a,0x91,0x68,0x71,0xca,0x8d,
+    0x3c,0x20,0x8c,0x16,0xd8,0x7c,0xfd,0x47,
+];
+
 #[derive(Arbitrary, Debug, Clone, Copy)]
 pub enum PointKind {
     Valid,
@@ -19,6 +26,8 @@ pub enum CoordMut {
     MinusOneModP,
     OneBitFlip,
     ZeroCoord,
+    AddPOverflow,
+    EqP,
 }
 
 fn fq_to_be_bytes(x: Fq) -> [u8; 32] {
@@ -96,6 +105,14 @@ fn mutate_coord(bytes_be: [u8; 32], m: CoordMut) -> [u8; 32] {
             v
         }
         CoordMut::ZeroCoord => [0u8; 32],
+        CoordMut::AddPOverflow => {
+            let mut v = bytes_be;
+            be_add_inplace32(&mut v, &BN254_P_BE);
+            v
+        },
+        CoordMut::EqP => {
+            BN254_P_BE
+        },
     }
 }
 
@@ -133,4 +150,33 @@ pub fn build_point_bytes(kind: PointKind, s_bytes: [u8; 32], mx: CoordMut, my: C
             out
         }
     }
+}
+
+#[inline]
+pub fn be_inc_inplace(x: &mut [u8; 32]) {
+    for i in (0..32).rev() {
+        let (v, c) = x[i].overflowing_add(1);
+        x[i] = v;
+        if !c { break; }
+    }
+}
+
+#[inline]
+pub fn be_dec_inplace(x: &mut [u8; 32]) {
+    for i in (0..32).rev() {
+        let (v, b) = x[i].overflowing_sub(1);
+        x[i] = v;
+        if !b { break; }
+    }
+}
+
+#[inline]
+pub fn be_add_inplace32(a: &mut [u8; 32], b: &[u8; 32]) -> bool {
+    let mut carry: u16 = 0;
+    for i in (0..32).rev() {
+        let sum = a[i] as u16 + b[i] as u16 + carry;
+        a[i] = (sum & 0xff) as u8;
+        carry = sum >> 8;
+    }
+    carry != 0
 }

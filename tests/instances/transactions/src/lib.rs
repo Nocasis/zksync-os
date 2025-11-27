@@ -8,13 +8,12 @@ use alloy::signers::local::PrivateKeySigner;
 use rig::alloy::consensus::TxEip7702;
 use rig::alloy::primitives::{address, b256};
 use rig::alloy::rpc::types::{AccessList, AccessListItem, TransactionRequest};
-use rig::ethers::types::Address;
+use rig::basic_system::system_implementation::system::pubdata::PUBDATA_ENCODING_VERSION;
 use rig::ruint::aliases::{B160, U256};
 use rig::zksync_os_interface::error::InvalidTransaction;
-use rig::{alloy, ethers, zksync_web3_rs, Chain};
+use rig::{alloy, zksync_web3_rs, Chain};
 use rig::{utils::*, BlockContext};
 use std::str::FromStr;
-use zksync_web3_rs::eip712::Eip712Meta;
 use zksync_web3_rs::signers::{LocalWallet, Signer};
 mod native_charging;
 
@@ -26,7 +25,9 @@ fn run_config() -> Option<rig::chain::RunConfig> {
         ..Default::default()
     })
 }
-fn run_base_system_common(use_712: bool) {
+
+#[test]
+fn run_base_system() {
     let mut chain = Chain::empty(None);
     // FIXME: this address looks very similar to bridgehub/shared bridge on gateway.
     // Which seems to suggest that it is special.
@@ -47,21 +48,8 @@ fn run_base_system_common(use_712: bool) {
 
     let from = wallet_ethers.address();
     let to = address!("0000000000000000000000000000000000010002");
-    let meta = Eip712Meta::new().gas_per_pubdata(0);
 
-    let encoded_mint_tx = if use_712 {
-        let mint_tx = rig::zksync_web3_rs::eip712::Eip712TransactionRequest::new()
-            .chain_id(37)
-            .from(from)
-            .to(rig::ethers::abi::Address::from_str(to.to_string().as_str()).unwrap())
-            .gas_limit(120_000)
-            .max_fee_per_gas(1000)
-            .max_priority_fee_per_gas(1000)
-            .data(hex::decode(ERC_20_MINT_CALLDATA).unwrap())
-            .custom_data(meta.clone())
-            .nonce(0);
-        rig::utils::sign_and_encode_eip712_tx(mint_tx, &wallet_ethers)
-    } else {
+    let encoded_mint_tx = {
         let mint_tx = TxLegacy {
             chain_id: 37u64.into(),
             nonce: 0,
@@ -74,19 +62,7 @@ fn run_base_system_common(use_712: bool) {
         rig::utils::sign_and_encode_alloy_tx(mint_tx, &wallet)
     };
 
-    let encoded_transfer_tx = if use_712 {
-        let transfer_tx = zksync_web3_rs::eip712::Eip712TransactionRequest::new()
-            .chain_id(37)
-            .from(from)
-            .to(ethers::abi::Address::from_str(to.to_string().as_str()).unwrap())
-            .gas_limit(100_000)
-            .max_fee_per_gas(1000)
-            .max_priority_fee_per_gas(1000)
-            .data(hex::decode(ERC_20_TRANSFER_CALLDATA).unwrap())
-            .custom_data(meta.clone())
-            .nonce(1);
-        rig::utils::sign_and_encode_eip712_tx(transfer_tx, &wallet_ethers)
-    } else {
+    let encoded_transfer_tx = {
         let transfer_tx = TxEip1559 {
             chain_id: 37u64,
             nonce: 1,
@@ -102,21 +78,7 @@ fn run_base_system_common(use_712: bool) {
     };
 
     // `to` == null
-    let encoded_deployment_tx = if use_712 {
-        let deployment_tx = zksync_web3_rs::eip712::Eip712TransactionRequest::new()
-            .chain_id(37)
-            .from(from)
-            .gas_limit(1_200_000)
-            .max_fee_per_gas(1000)
-            .max_priority_fee_per_gas(1000)
-            .data(hex::decode(ERC_20_DEPLOYMENT_BYTECODE).unwrap())
-            .custom_data(meta.clone())
-            .nonce(2);
-        rig::utils::sign_and_encode_eip712_tx(
-            deployment_tx,
-            &LocalWallet::from_bytes(wallet.to_bytes().as_slice()).unwrap(),
-        )
-    } else {
+    let encoded_deployment_tx = {
         let deployment_tx = TxEip2930 {
             chain_id: 37u64,
             nonce: 2,
@@ -129,22 +91,7 @@ fn run_base_system_common(use_712: bool) {
         };
         rig::utils::sign_and_encode_alloy_tx(deployment_tx, &wallet)
     };
-    let encoded_transfer_to_eoa_tx = if use_712 {
-        let eoa_to = "4242000000000000000000000000000000000000";
-        let deployment_tx = zksync_web3_rs::eip712::Eip712TransactionRequest::new()
-            .chain_id(37)
-            .from(eoa_wallet_ethers.address())
-            .gas_limit(21_000)
-            .max_fee_per_gas(1000)
-            .max_priority_fee_per_gas(1000)
-            .to(rig::ethers::abi::Address::from_str(eoa_to).unwrap())
-            .custom_data(meta.clone())
-            .nonce(0);
-        rig::utils::sign_and_encode_eip712_tx(
-            deployment_tx,
-            &LocalWallet::from_bytes(eoa_wallet.to_bytes().as_slice()).unwrap(),
-        )
-    } else {
+    let encoded_transfer_to_eoa_tx = {
         let eoa_to = address!("4242000000000000000000000000000000000000");
         let transfer_to_eoa = TxEip1559 {
             chain_id: 37u64,
@@ -160,21 +107,7 @@ fn run_base_system_common(use_712: bool) {
         rig::utils::sign_and_encode_alloy_tx(transfer_to_eoa, &eoa_wallet)
     };
 
-    let deployed = Address::from_str("0x14c252e395055507b10f199dd569f2379465d874").unwrap();
-
-    let encoded_mint2_tx = if use_712 {
-        let mint_tx = zksync_web3_rs::eip712::Eip712TransactionRequest::new()
-            .chain_id(37)
-            .from(from)
-            .to(deployed)
-            .gas_limit(100_000)
-            .max_fee_per_gas(1000)
-            .max_priority_fee_per_gas(1000)
-            .data(hex::decode(ERC_20_MINT_CALLDATA).unwrap())
-            .custom_data(meta.clone())
-            .nonce(3);
-        rig::utils::sign_and_encode_eip712_tx(mint_tx, &wallet_ethers)
-    } else {
+    let encoded_mint2_tx = {
         let mint_tx = TxEip1559 {
             chain_id: 37u64,
             nonce: 3,
@@ -244,7 +177,7 @@ fn run_base_system_common(use_712: bool) {
             U256::from(1_000_000_000_000_000_u64),
         );
 
-    let output = chain.run_block(transactions, None, run_config());
+    let output = chain.run_block(transactions, None, None, run_config());
 
     // Assert all txs succeeded
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {
@@ -337,7 +270,7 @@ fn test_withdrawal() {
         U256::from(1_000_000_000_000_000_u64),
     );
 
-    let output = chain.run_block(transactions, None, run_config());
+    let output = chain.run_block(transactions, None, None, run_config());
 
     // Assert all txs succeeded
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {
@@ -412,7 +345,7 @@ fn test_tx_with_access_list() {
         U256::from(1_000_000_000_000_000_u64),
     );
 
-    let output = chain.run_block(transactions, None, run_config());
+    let output = chain.run_block(transactions, None, None, run_config());
 
     // Assert all txs succeeded
     let result0 = output.tx_results.first().unwrap().clone();
@@ -482,7 +415,7 @@ fn test_tx_with_authorization_list() {
         check_storage_diff_hashes: true,
         ..Default::default()
     };
-    let output = chain.run_block(transactions, None, Some(run_config));
+    let output = chain.run_block(transactions, None, None, Some(run_config));
 
     // Assert all txs succeeded
     let result0 = output.tx_results.first().unwrap().clone();
@@ -557,7 +490,7 @@ fn test_cold_in_new_tx() {
         U256::from(1_000_000_000_000_000_u64),
     );
 
-    let output = chain.run_block(transactions, None, run_config());
+    let output = chain.run_block(transactions, None, None, run_config());
 
     // Assert all txs succeeded
     let result0 = output.tx_results.first().unwrap().clone();
@@ -628,7 +561,7 @@ fn test_independent_txs_have_same_pubdata() {
             U256::from(1_000_000_000_000_000_u64),
         );
 
-    let output = chain.run_block(transactions, None, run_config());
+    let output = chain.run_block(transactions, None, None, run_config());
 
     // Assert all txs succeeded and compare pubdata len
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {
@@ -695,7 +628,7 @@ fn test_invalid_tx_does_not_bump_tx_counter() {
         B160::from_be_bytes(from.0),
         U256::from(1_000_000_000_000_000_u64),
     );
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert tx succeeded/failed
     let result0 = output.tx_results.first().unwrap().clone();
@@ -747,7 +680,7 @@ fn test_invalid_tx_does_not_affect_native() {
         B160::from_be_bytes(from.0),
         U256::from(1_000_000_000_000_000_u64),
     );
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert tx succeeded
     let result = output.tx_results.first().unwrap().clone();
@@ -778,7 +711,7 @@ fn test_invalid_tx_does_not_affect_native() {
         B160::from_be_bytes(from.0),
         U256::from(1_000_000_000_000_000_u64),
     );
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert tx succeeded
     let result0 = output.tx_results.first().unwrap().clone();
@@ -857,21 +790,11 @@ fn test_regression_returndata_empty_3541() {
         U256::from(1_000_000_000_000_000_u64),
     );
 
-    let output = chain.run_block(transactions, None, run_config());
+    let output = chain.run_block(transactions, None, None, run_config());
 
     // Assert all txs succeeded
     let result0 = output.tx_results.first().unwrap().clone();
     assert!(result0.is_ok_and(|o| o.is_success()));
-}
-
-#[test]
-fn run_base_system() {
-    run_base_system_common(false);
-}
-
-#[test]
-fn run_base_712_system() {
-    run_base_system_common(true);
 }
 
 /// Test that transactions with balance calculation overflow are properly rejected
@@ -923,7 +846,12 @@ fn test_balance_overflow_protection() {
         rig::utils::sign_and_encode_alloy_tx(tx, &wallet)
     };
 
-    let output = chain.run_block(vec![overflow_fee_tx, overflow_total_tx], None, run_config());
+    let output = chain.run_block(
+        vec![overflow_fee_tx, overflow_total_tx],
+        None,
+        None,
+        run_config(),
+    );
 
     assert!(
         output.tx_results.get(0).unwrap().is_err(),
@@ -966,7 +894,7 @@ fn test_upgrade_tx_revert_internal_error() {
     let transactions = vec![upgrade_tx];
 
     // Use run_block_no_panic to catch the error instead of panicking
-    let result = chain.run_block_no_panic(transactions, None, None);
+    let result = chain.run_block_no_panic(transactions, None, None, None);
 
     // The upgrade transaction should fail with an internal error (not validation error)
     assert!(result.is_err());
@@ -1010,7 +938,7 @@ fn test_upgrade_tx_succeeds() {
     let transactions = vec![upgrade_tx];
 
     // Use run_block_no_panic to catch the error instead of panicking
-    let result = chain.run_block_no_panic(transactions, None, None);
+    let result = chain.run_block_no_panic(transactions, None, None, None);
     assert!(result.is_ok());
 
     assert!(result.unwrap().tx_results[0].as_ref().unwrap().is_success());
@@ -1047,7 +975,7 @@ fn test_invalid_transaction_type_failure() {
         );
 
         let transactions = vec![invalid_tx];
-        let result = chain.run_block(transactions, None, run_config());
+        let result = chain.run_block(transactions, None, None, run_config());
         assert!(
             result.tx_results[0].is_err(),
             "Transaction with invalid type should fail"
@@ -1115,7 +1043,7 @@ fn test_modexp_intermediate_zero_block() {
         U256::from(10u64.pow(18)),
     );
 
-    let result = chain.run_block(transactions, None, None);
+    let result = chain.run_block(transactions, None, None, None);
 
     // The transaction should succeed
     assert!(
@@ -1190,7 +1118,7 @@ fn test_point_eval_call() {
         U256::from(10u64.pow(18)),
     );
 
-    let result = chain.run_block(transactions, None, None);
+    let result = chain.run_block(transactions, None, None, None);
 
     // The transaction should succeed
     assert!(result.tx_results[0].is_ok(), "Transaction should succeed");
@@ -1249,7 +1177,7 @@ fn test_selfdestruct_to_precompile_gas() {
         rig::utils::sign_and_encode_alloy_tx(tx, &wallet)
     };
 
-    let result = chain.run_block(vec![encoded_tx], None, None);
+    let result = chain.run_block(vec![encoded_tx], None, None, None);
     let res0 = result.tx_results.first().expect("Must have a tx result");
     assert!(res0.as_ref().is_ok(), "Tx should succeed");
     let gas_used = res0.clone().unwrap().gas_used;
@@ -1303,9 +1231,148 @@ fn test_reject_caller_with_code_behavior() {
     );
 
     // But in normal mode it should fail
-    let result_normal = chain.run_block(vec![from_contract_tx], None, run_config());
+    let result_normal = chain.run_block(vec![from_contract_tx], None, None, run_config());
     assert!(matches!(
         result_normal.tx_results[0],
         Err(InvalidTransaction::RejectCallerWithCode)
     ));
+}
+
+#[test]
+fn test_expensive_pubdata() {
+    // Test if a transaction can be executed even if the pubdata price is such that
+    // validation pubdata requires to use withheld resources.
+    let mut chain = Chain::empty(None);
+    let wallet = chain.random_signer();
+    let from = wallet.address();
+    let target_address = address!("4242000000000000000000000000000000000000");
+
+    // Set balance for the contract address
+    chain.set_balance(B160::from_be_bytes(from.into_array()), U256::from(u64::MAX));
+
+    let tx = {
+        let tx = TxEip1559 {
+            chain_id: 37u64,
+            nonce: 0,
+            max_fee_per_gas: 134217728,
+            max_priority_fee_per_gas: 134217728,
+            gas_limit: 75_000,
+            to: TxKind::Call(target_address),
+            value: Default::default(),
+            input: Default::default(),
+            access_list: Default::default(),
+        };
+        rig::utils::sign_and_encode_alloy_tx(tx, &wallet)
+    };
+
+    // Validation uses 40 bytes of pubdata, we want the validation
+    // pubdata charge to be > MAX_NATIVE_COMPUTATIONAL (2^35), to
+    // ensure we use withheld resources for it.
+    let native_price = U256::from(100);
+    // Value s.t. (pubdata_price / native_price) * 40 > MAX_NATIVE_COMPUTATIONAL
+    let pubdata_price = U256::from(85899346000u64);
+
+    let block_context = BlockContext {
+        native_price,
+        pubdata_price,
+        eip1559_basefee: U256::from(1),
+        ..Default::default()
+    };
+    // Check tx succeeds
+    let result = chain.run_block(vec![tx], Some(block_context), None, run_config());
+    let res0 = result.tx_results.first().expect("Must have a tx result");
+    assert!(res0.as_ref().is_ok(), "Tx should succeed");
+}
+
+#[test]
+fn test_check_pubdata_encoding_version() {
+    let mut chain = Chain::empty(None);
+    let wallet = chain.random_signer();
+    let from = wallet.address();
+    let target_address = address!("4242000000000000000000000000000000000000");
+
+    // Set balance for the contract address
+    chain.set_balance(B160::from_be_bytes(from.into_array()), U256::from(u64::MAX));
+
+    let tx = {
+        let tx = TxEip1559 {
+            chain_id: 37u64,
+            nonce: 0,
+            max_fee_per_gas: 134217728,
+            max_priority_fee_per_gas: 134217728,
+            gas_limit: 75_000,
+            to: TxKind::Call(target_address),
+            value: Default::default(),
+            input: Default::default(),
+            access_list: Default::default(),
+        };
+        rig::utils::sign_and_encode_alloy_tx(tx, &wallet)
+    };
+
+    let native_price = U256::from(100);
+    let pubdata_price = U256::from(2);
+
+    let block_context = BlockContext {
+        native_price,
+        pubdata_price,
+        eip1559_basefee: U256::from(1),
+        ..Default::default()
+    };
+    // Check tx succeeds
+    let result = chain.run_block(vec![tx], Some(block_context), None, run_config());
+    let res0 = result.tx_results.first().expect("Must have a tx result");
+    assert!(res0.as_ref().is_ok(), "Tx should succeed");
+
+    assert_eq!(result.pubdata[0], PUBDATA_ENCODING_VERSION);
+}
+
+#[test]
+fn test_check_pubdata_has_timestamp() {
+    let mut chain = Chain::empty(None);
+    let wallet = chain.random_signer();
+    let from = wallet.address();
+    let target_address = address!("4242000000000000000000000000000000000000");
+
+    // Set balance for the contract address
+    chain.set_balance(B160::from_be_bytes(from.into_array()), U256::from(u64::MAX));
+
+    let tx = {
+        let tx = TxEip1559 {
+            chain_id: 37u64,
+            nonce: 0,
+            max_fee_per_gas: 134217728,
+            max_priority_fee_per_gas: 134217728,
+            gas_limit: 75_000,
+            to: TxKind::Call(target_address),
+            value: Default::default(),
+            input: Default::default(),
+            access_list: Default::default(),
+        };
+        rig::utils::sign_and_encode_alloy_tx(tx, &wallet)
+    };
+
+    let native_price = U256::from(100);
+    let pubdata_price = U256::from(2);
+    let timestamp: u64 = 42;
+
+    let block_context = BlockContext {
+        native_price,
+        pubdata_price,
+        eip1559_basefee: U256::from(1),
+        timestamp,
+        ..Default::default()
+    };
+    // Check tx succeeds
+    let result = chain.run_block(vec![tx], Some(block_context), None, run_config());
+    let res0 = result.tx_results.first().expect("Must have a tx result");
+    assert!(res0.as_ref().is_ok(), "Tx should succeed");
+
+    // Pubdata format is [VERSION(1)][BLOCK_HASH(32)][TIMESTAMP(8)][DIFFS...]
+    let pubdata_timestamp_bytes = &result.pubdata.as_slice()[33..41];
+    let pubdata_timestamp = u64::from_be_bytes(
+        pubdata_timestamp_bytes
+            .try_into()
+            .expect("Slice with incorrect length"),
+    );
+    assert_eq!(timestamp, pubdata_timestamp, "Timestamps do not match");
 }

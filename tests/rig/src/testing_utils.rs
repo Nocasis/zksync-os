@@ -82,7 +82,7 @@ pub fn call_address_and_measure_gas_cost(
     let mut tracer = CallTracer::default();
 
     let (output, _, _) = chain
-        .run_block_with_extra_stats(transactions, None, None, &mut tracer)
+        .run_block_with_extra_stats(transactions, None, None, None, &mut tracer)
         .expect("Should succeed");
 
     // Assert transaction succeeded

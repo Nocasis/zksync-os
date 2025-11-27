@@ -107,7 +107,7 @@ impl ZKsyncOS {
         };
         let result = self
             .chain
-            .run_block_no_panic(encoded_txs, Some(context), Some(run_config));
+            .run_block_no_panic(encoded_txs, Some(context), None, Some(run_config));
 
         self.get_block_execution_result(result)
     }

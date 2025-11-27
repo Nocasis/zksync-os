@@ -7,9 +7,11 @@ use alloy::consensus::{TxEip1559, TxLegacy};
 use alloy::primitives::TxKind;
 use alloy::signers::local::PrivateKeySigner;
 use rig::alloy::primitives::address;
+use rig::forward_system::run::generate_batch_proof_input;
 use rig::log::debug;
 use rig::ruint::aliases::{B160, U256};
 use rig::utils::{ERC_20_BYTECODE, ERC_20_MINT_CALLDATA, ERC_20_TRANSFER_CALLDATA};
+use rig::zk_ee::common_structs::DACommitmentScheme;
 use rig::zk_ee::system::tracer::NopTracer;
 use rig::{alloy, zksync_web3_rs, Chain};
 use risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
@@ -17,8 +19,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use zksync_web3_rs::signers::{LocalWallet, Signer};
 
-#[test]
-fn run_many_blocks_proof_run() {
+fn run_multiblock_batch_proof_run(da_commitment_scheme: DACommitmentScheme) {
     let mut chain = Chain::empty(None);
     let wallet = PrivateKeySigner::from_str(
         "dcf2cbdd171a21c480aa7f53d77f31bb102282b3ff099c78e3118b37348c72f7",
@@ -50,10 +51,15 @@ fn run_many_blocks_proof_run() {
         rig::utils::sign_and_encode_alloy_tx(mint_tx, &wallet)
     };
 
-    let proof_input_1 = chain
-        .run_block_with_extra_stats(vec![encoded_mint_tx], None, None, &mut NopTracer::default())
-        .unwrap()
-        .2;
+    let block1_result = chain
+        .run_block_with_extra_stats(
+            vec![encoded_mint_tx],
+            None,
+            Some(da_commitment_scheme),
+            None,
+            &mut NopTracer::default(),
+        )
+        .unwrap();
     let encoded_transfer_tx = {
         let transfer_tx = TxEip1559 {
             chain_id: 37u64,
@@ -69,20 +75,24 @@ fn run_many_blocks_proof_run() {
         rig::utils::sign_and_encode_alloy_tx(transfer_tx, &wallet)
     };
 
-    let proof_input_2 = chain
+    let block2_result = chain
         .run_block_with_extra_stats(
             vec![encoded_transfer_tx],
             None,
+            Some(da_commitment_scheme),
             None,
             &mut NopTracer::default(),
         )
-        .unwrap()
-        .2;
+        .unwrap();
 
-    let mut batch_input = Vec::with_capacity(1 + proof_input_1.len() + proof_input_2.len());
-    batch_input.push(2);
-    batch_input.extend(proof_input_1.into_iter());
-    batch_input.extend(proof_input_2.into_iter());
+    let batch_input = generate_batch_proof_input(
+        vec![block1_result.2.as_slice(), block2_result.2.as_slice()],
+        da_commitment_scheme,
+        vec![
+            block1_result.0.pubdata.as_slice(),
+            block2_result.0.pubdata.as_slice(),
+        ],
+    );
 
     let multinblock_program_path = PathBuf::from(std::env::var("CARGO_WORKSPACE_DIR").unwrap())
         .join("zksync_os")
@@ -102,4 +112,14 @@ fn run_many_blocks_proof_run() {
 
     // Ensure that proof running didn't fail: check that output is not zero
     assert!(proof_output.into_iter().any(|word| word != 0));
+}
+
+#[test]
+fn run_multiblock_batch_proof_run_calldata() {
+    run_multiblock_batch_proof_run(DACommitmentScheme::BlobsAndPubdataKeccak256);
+}
+
+#[test]
+fn run_multiblock_batch_proof_run_blobs() {
+    run_multiblock_batch_proof_run(DACommitmentScheme::BlobsZKsyncOS);
 }

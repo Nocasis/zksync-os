@@ -52,7 +52,7 @@ fn test_set_bytecode_details_evm() {
     };
     let transactions = vec![encoded_tx];
 
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert all txs succeeded
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {
@@ -109,7 +109,7 @@ fn test_set_deployed_bytecode_evm_unauthorized() {
     };
     let transactions = vec![encoded_tx];
 
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     if let ExecutionResult::Success(_) = output
         .tx_results
@@ -158,7 +158,7 @@ fn test_l2_base_token_withdraw_events() {
     let encoded_tx = rig::utils::encode_l1_tx(tx);
     let transactions = vec![encoded_tx];
 
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert transaction succeeded
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {
@@ -246,7 +246,7 @@ fn test_l2_base_token_withdraw_with_message_events() {
     let encoded_tx = rig::utils::encode_l1_tx(tx);
     let transactions = vec![encoded_tx];
 
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert transaction succeeded
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {
@@ -323,7 +323,7 @@ fn test_l2_base_token_withdraw_with_dirty_address() {
     let encoded_tx = rig::utils::encode_l1_tx(tx);
     let transactions = vec![encoded_tx];
 
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert transaction failed due to insufficient balance
     assert!(
@@ -389,7 +389,7 @@ fn test_l2_base_token_withdraw_with_message_with_dirty_address() {
     let encoded_tx = rig::utils::encode_l1_tx(tx);
     let transactions = vec![encoded_tx];
 
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert transaction failed due to insufficient balance
     assert!(
@@ -436,7 +436,7 @@ fn test_l2_base_token_no_mint_event_regression() {
     let encoded_tx = rig::utils::encode_l1_tx(tx);
     let transactions = vec![encoded_tx];
 
-    let output = chain.run_block(transactions, None, None);
+    let output = chain.run_block(transactions, None, None, None);
 
     // Assert transaction succeeded
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {

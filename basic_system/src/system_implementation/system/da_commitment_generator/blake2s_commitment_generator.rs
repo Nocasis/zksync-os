@@ -1,6 +1,7 @@
 use crate::system_implementation::system::da_commitment_generator::DACommitmentGenerator;
 use crypto::blake2s::Blake2s256;
 use crypto::MiniDigest;
+use zk_ee::oracle::IOOracle;
 use zk_ee::utils::write_bytes::WriteBytes;
 use zk_ee::utils::Bytes32;
 
@@ -22,8 +23,8 @@ impl WriteBytes for Blake2sCommitmentGenerator {
     }
 }
 
-impl DACommitmentGenerator for Blake2sCommitmentGenerator {
-    fn da_commitment(&mut self) -> Bytes32 {
+impl<O: IOOracle> DACommitmentGenerator<O> for Blake2sCommitmentGenerator {
+    fn finalize(&mut self, _oracle: &mut O) -> Bytes32 {
         self.pubdata_hasher.finalize_reset().into()
     }
 }

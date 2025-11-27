@@ -12,6 +12,7 @@ pub mod helpers;
 
 /// Runs the batch, and returns the output (that contains gas usage, transaction status etc.).
 pub use forward_system::run::run_block;
+use zk_ee::common_structs::da_commitment_scheme::DACommitmentScheme;
 use zk_ee::common_structs::ProofData;
 
 /// Runs a block in RISC-V - using zksync_os binary - and returns the
@@ -22,6 +23,7 @@ pub fn run_block_generate_witness(
     preimage_source: InMemoryPreimageSource,
     tx_source: TxListSource,
     proof_data: ProofData<StorageCommitment>,
+    da_commitment_scheme: DACommitmentScheme,
     zksync_os_bin_path: &str,
 ) -> Vec<u32> {
     use forward_system::run::*;
@@ -32,6 +34,7 @@ pub fn run_block_generate_witness(
         preimage_source,
         tx_source,
         Some(proof_data),
+        Some(da_commitment_scheme),
         false,
     );
 

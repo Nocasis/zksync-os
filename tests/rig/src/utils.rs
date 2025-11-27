@@ -4,6 +4,8 @@
 
 use crate::chain::BlockContext;
 use crate::Chain;
+use alloy::consensus::SidecarBuilder;
+use alloy::consensus::SimpleCoder;
 use alloy::consensus::TxEip1559;
 use alloy::consensus::TxEnvelope;
 use alloy::primitives::Address;
@@ -19,13 +21,11 @@ use std::str::FromStr;
 pub use zksync_os_api::helpers::*;
 use zksync_os_interface::traits::EncodedTx;
 use zksync_os_interface::types::BlockOutput;
-use zksync_web3_rs::eip712::{Eip712Transaction, Eip712TransactionRequest};
-use zksync_web3_rs::signers::Signer;
-use zksync_web3_rs::zks_utils::EIP712_TX_TYPE;
 
 pub use basic_system::system_implementation::flat_storage_model::{
     address_into_special_storage_key, AccountProperties, ACCOUNT_PROPERTIES_STORAGE_ADDRESS,
 };
+use zk_ee::common_structs::DACommitmentScheme;
 
 ///
 /// Load wasm contract bytecode from `tests/contracts_wasm/{contract_name}`.
@@ -109,73 +109,6 @@ pub fn sign_and_encode_ethers_legacy_tx(
         Address::from_slice(a.as_bytes())
     };
     EncodedTx::Rlp(raw.to_vec(), from)
-}
-
-///
-/// Sign and encode EIP-712 zkSync transaction using given wallet.
-///
-/// Panics if needed fields are missed or too big.
-///
-pub fn sign_and_encode_eip712_tx(
-    tx: Eip712TransactionRequest,
-    wallet: &ethers::signers::LocalWallet,
-) -> EncodedTx {
-    let request = tx.clone();
-    let signable_data: Eip712Transaction = request.clone().try_into().unwrap();
-    // Use the correct value for gasPerPubdataByteLimit, there's a bug in the
-    // zksync-web3-rs crate.
-    let signable_data = signable_data.gas_per_pubdata_byte_limit(tx.custom_data.gas_per_pubdata);
-    let signature: ethers::types::Signature =
-        futures::executor::block_on(wallet.sign_typed_data(&signable_data))
-            .expect("signing failed");
-
-    let tx_type = EIP712_TX_TYPE;
-    let from = wallet.address().0;
-    let to = Some(tx.to.0);
-    let gas_limit = tx.gas_limit.unwrap().as_u128();
-    let gas_per_pubdata_byte_limit = Some(tx.custom_data.gas_per_pubdata.as_u128());
-    let max_fee_per_gas = tx.max_fee_per_gas.unwrap().as_u128();
-    let max_priority_fee_per_gas = Some(tx.max_priority_fee_per_gas.as_u128());
-    let paymaster = Some(
-        tx.custom_data
-            .clone()
-            .paymaster_params
-            .map(|p| p.paymaster.0)
-            .unwrap_or_default(),
-    );
-    let nonce = tx.nonce.as_u128();
-    let mut value = [0u8; 32];
-    tx.value.to_big_endian(&mut value);
-    let data = tx.data.0.to_vec();
-    assert!(
-        tx.custom_data.factory_deps.is_empty(),
-        "factory deps not supported for now"
-    );
-    let signature = signature.to_vec();
-    let paymaster_input = Some(
-        tx.custom_data
-            .paymaster_params
-            .map(|p| p.paymaster_input)
-            .unwrap_or_default(),
-    );
-
-    encode_tx(
-        tx_type,
-        from,
-        to,
-        gas_limit,
-        gas_per_pubdata_byte_limit,
-        max_fee_per_gas,
-        max_priority_fee_per_gas,
-        paymaster,
-        nonce,
-        value,
-        data,
-        signature,
-        paymaster_input,
-        None,
-        true,
-    )
 }
 
 ///
@@ -315,7 +248,12 @@ pub fn run_block_of_erc20<const RANDOMIZED: bool>(
         chain.set_storage_slot(ruint::aliases::B160::from_be_bytes(to.0 .0), key, value)
     });
 
-    let output = chain.run_block(transactions, block_context, None);
+    let output = chain.run_block(
+        transactions,
+        block_context,
+        Some(DACommitmentScheme::BlobsAndPubdataKeccak256),
+        None,
+    );
     assert!(output.tx_results.iter().cloned().enumerate().all(|(i, r)| {
         let success = r.clone().is_ok_and(|o| o.is_success());
         if !success {
@@ -357,7 +295,7 @@ pub fn run_block_of_erc20<const RANDOMIZED: bool>(
 //         }
 //     }
 // }
-/// Contract that forwards all calls to a target address and stores as hash of the returndata in slot 0.
+/// Contract that forwards all calls to a target address and stores a hash of the returndata in slot 0.
 pub const FORWARDER_BYTECODE: &str = "608060405234801561000f575f5ffd5b5060043610610029575f3560e01c80637c07e7a01461002d575b5f5ffd5b6100476004803603810190610042919061017a565b61005f565b60405161005693929190610279565b60405180910390f35b5f60605f83604051818782375f5f83835f8c5af194503d601f19603f8401168201818152815f602083013e601f19601f8301166020820101604052809550816020820120805f55809550505050505093509350939050565b5f5ffd5b5f5ffd5b5f73ffffffffffffffffffffffffffffffffffffffff82169050919050565b5f6100e8826100bf565b9050919050565b6100f8816100de565b8114610102575f5ffd5b50565b5f81359050610113816100ef565b92915050565b5f5ffd5b5f5ffd5b5f5ffd5b5f5f83601f84011261013a57610139610119565b5b8235905067ffffffffffffffff8111156101575761015661011d565b5b60208301915083600182028301111561017357610172610121565b5b9250929050565b5f5f5f60408486031215610191576101906100b7565b5b5f61019e86828701610105565b935050602084013567ffffffffffffffff8111156101bf576101be6100bb565b5b6101cb86828701610125565b92509250509250925092565b5f8115159050919050565b6101eb816101d7565b82525050565b5f81519050919050565b5f82825260208201905092915050565b8281835e5f83830152505050565b5f601f19601f8301169050919050565b5f610233826101f1565b61023d81856101fb565b935061024d81856020860161020b565b61025681610219565b840191505092915050565b5f819050919050565b61027381610261565b82525050565b5f60608201905061028c5f8301866101e2565b818103602083015261029e8185610229565b90506102ad604083018461026a565b94935050505056fea264697066735822122090beea9a833a886d141d0bf71b4bd914c28eafa53f68e87a9909e2a0ab8469ac64736f6c634300081e0033";
 
 sol! {
@@ -371,4 +309,55 @@ pub fn calldata_for_forwarder(target: alloy::primitives::Address, input: &[u8]) 
         call_data: input.to_vec().into(),
     };
     call.abi_encode()
+}
+
+/// Generate a 4844 blob versioned hash using Alloy's reference implementation.
+///
+/// # Arguments
+/// * `data` - Raw data to be encoded into a blob
+///
+/// # Returns
+/// * `[u8; 32]` - The versioned hash of the blob
+pub fn get_alloy_4844_blob_versioned_hash(data: &[u8]) -> [u8; 32] {
+    // Create a blob sidecar using Alloy's SimpleCoder (handles encoding internally)
+    let blob_sidecar = SidecarBuilder::<SimpleCoder>::from_slice(data)
+        .build()
+        .unwrap();
+
+    // Extract the versioned hash - there should be exactly one for single blob
+    let mut alloy_hashes_iter = blob_sidecar.versioned_hashes();
+    let versioned_hash_alloy = alloy_hashes_iter.next().expect("Should exist");
+    assert!(
+        alloy_hashes_iter.next().is_none(),
+        "Should only have one blob"
+    );
+
+    versioned_hash_alloy.0
+}
+
+/// Encode raw pubdata for EIP-4844 blob format.
+///
+/// We need to prepend the data with its length to match the expected blob format used by Alloy's SimpleCoder.
+///
+/// # Format
+/// - First 31 bytes: Length prefix (first 8 bytes contain the actual length as big-endian u64)
+/// - Remaining bytes: The actual data
+///
+/// # Arguments
+/// * `data` - Raw data to encode
+///
+/// # Returns
+/// * `Vec<u8>` - Encoded data ready for blob commitment generation
+pub fn encode_pubdata_for_4844_blobs(data: &[u8]) -> Vec<u8> {
+    // Allocate 31 bytes for the length prefix (using 31 bytes for field element alignment)
+    let mut vec = Vec::from([0u8; 31]);
+    // Get the length of the actual data
+    let length = data.len();
+
+    // Store the length in the first 8 bytes as a big-endian u64
+    vec[0..8].copy_from_slice(&(length as u64).to_be_bytes());
+
+    vec.extend_from_slice(data);
+
+    vec
 }

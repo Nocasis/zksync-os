@@ -38,7 +38,7 @@ fn get_name_sol() {
         profiler_config: Some(pc),
         ..Default::default()
     };
-    chain.run_block(vec![tx_get_name], None, Some(run_config));
+    chain.run_block(vec![tx_get_name], None, None, Some(run_config));
 }
 
 // WASM disabled for now
@@ -126,7 +126,7 @@ fn balance_of_sol() {
         profiler_config: Some(pc),
         ..Default::default()
     };
-    chain.run_block(vec![tx_mint, tx_balance], None, Some(run_config));
+    chain.run_block(vec![tx_mint, tx_balance], None, None, Some(run_config));
 }
 
 // WASM disabled for now
@@ -238,7 +238,7 @@ fn transfer_sol() {
         profiler_config: Some(pc),
         ..Default::default()
     };
-    chain.run_block(vec![tx_mint, tx_transfer], None, Some(run_config));
+    chain.run_block(vec![tx_mint, tx_transfer], None, None, Some(run_config));
 }
 
 // WASM disabled for now

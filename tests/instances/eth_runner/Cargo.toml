@@ -31,9 +31,13 @@ reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"] }
 zstd = "0.13"
 flate2 = "1.0"
 sha2 = "0.10"
+# zerocopy 0.8.29 introduced a compilation issue, remove this
+# when the compilation issue is resolved
+zerocopy = { version = "=0.8.28" }
 
 [features]
 simulate_witness_gen = ["rig/simulate_witness_gen"]
 proving = ["rig/airbender_cli"]
 gpu = ["rig/gpu"]
 default = []
+

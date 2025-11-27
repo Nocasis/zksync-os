@@ -62,6 +62,7 @@ fn run<const RANDOMIZED: bool>(
         .run_block_with_extra_stats(
             transactions,
             Some(block_context),
+            None,
             Some(run_config),
             &mut NopTracer::default(),
         )

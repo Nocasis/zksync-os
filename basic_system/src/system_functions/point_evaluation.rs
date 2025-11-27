@@ -1,15 +1,10 @@
 use crate::cost_constants::{POINT_EVALUATION_COST_ERGS, POINT_EVALUATION_NATIVE_COST};
-use consts::{G2_BY_TAU_POINT, PREPARED_G2_GENERATOR};
-use crypto::ark_ec::pairing::Pairing;
-use crypto::ark_ec::AffineRepr;
-use crypto::ark_ff::{Field, PrimeField};
+use crypto::ark_ff::PrimeField;
 use zk_ee::common_traits::TryExtend;
 use zk_ee::interface_error;
 use zk_ee::out_of_return_memory;
 use zk_ee::system::errors::subsystem::SubsystemError;
 use zk_ee::system::*;
-
-mod consts;
 
 ///
 /// Point evaluation system function implementation.
@@ -48,22 +43,7 @@ pub const POINT_EVAL_PRECOMPILE_SUCCESS_RESPONSE: [u8; 64] = const {
 };
 pub const KZG_VERSIONED_HASH_VERSION_BYTE: u8 = 0x01;
 
-// We do not need internal representation, just canonical scalar
-fn parse_scalar(input: &[u8; 32]) -> Result<<crypto::bls12_381::Fr as PrimeField>::BigInt, ()> {
-    // Arkworks has strange format for integer serialization, so we do manually
-    let mut repr = [0u64; 4];
-    for (dst, src) in repr.iter_mut().zip(input.as_rchunks::<8>().1.iter().rev()) {
-        *dst = u64::from_be_bytes(*src);
-    }
-    let repr = crypto::BigInt::new(repr);
-    if repr >= crypto::bls12_381::Fr::MODULUS {
-        Err(())
-    } else {
-        Ok(repr)
-    }
-}
-
-fn versioned_hash_for_kzg(data: &[u8]) -> [u8; 32] {
+pub fn versioned_hash_for_kzg(data: &[u8]) -> [u8; 32] {
     use crypto::sha256::Digest;
     let mut hash: [u8; 32] = crypto::sha256::Sha256::digest(data).into();
     hash[0] = KZG_VERSIONED_HASH_VERSION_BYTE;
@@ -71,7 +51,18 @@ fn versioned_hash_for_kzg(data: &[u8]) -> [u8; 32] {
     hash
 }
 
-fn parse_g1_compressed(input: &[u8]) -> Result<crypto::bls12_381::G1Affine, ()> {
+// We do not need internal representation, just canonical scalar
+fn parse_scalar(input: &[u8; 32]) -> Result<<crypto::bls12_381::Fr as PrimeField>::BigInt, ()> {
+    // Arkworks has strange format for integer serialization, so we do manually
+    let result = crypto::parse_u256_be(input);
+    if result >= crypto::bls12_381::Fr::MODULUS {
+        Err(())
+    } else {
+        Ok(result)
+    }
+}
+
+pub fn parse_g1_compressed(input: &[u8]) -> Result<crypto::bls12_381::G1Affine, ()> {
     // format coincides with one defined in ZCash/Arkworks
     use crypto::ark_serialize::CanonicalDeserialize;
     crypto::bls12_381::G1Affine::deserialize_compressed(input).map_err(|_| ())
@@ -131,29 +122,14 @@ fn point_evaluation_as_system_function_inner<D: ?Sized + TryExtend<u8>, R: Resou
         ));
     };
 
-    // e(y - P, G₂) * e(proof, X - z) == 1
-    let mut y_minus_p = crypto::bls12_381::G1Affine::generator().mul_bigint(&y);
-    y_minus_p -= &commitment_point;
-
-    let mut g2_el: crypto::bls12_381::G2Projective = G2_BY_TAU_POINT.into();
-    let z_in_g2 = crypto::bls12_381::G2Affine::generator().mul_bigint(&z);
-    g2_el -= z_in_g2;
-
-    use crypto::ark_ec::CurveGroup;
-    let y_minus_p_prepared: crypto::bls12_381::G1Affine = y_minus_p.into_affine();
-    let g2_el: <crypto::bls12_381::curves::Bls12_381 as crypto::ark_ec::pairing::Pairing>::G2Prepared = g2_el.into_affine().into();
-
-    let gt_el = crypto::bls12_381::curves::Bls12_381::multi_pairing(
-        [y_minus_p_prepared, proof],
-        [PREPARED_G2_GENERATOR.clone(), g2_el],
-    );
-    if gt_el.0 == <crypto::bls12_381::curves::Bls12_381 as crypto::ark_ec::pairing::Pairing>::TargetField::ONE {
-        dst.try_extend(POINT_EVAL_PRECOMPILE_SUCCESS_RESPONSE).map_err(|_| out_of_return_memory!())?;
+    if crypto::bls12_381::verify_kzg_proof(commitment_point, proof, z, y) {
+        dst.try_extend(POINT_EVAL_PRECOMPILE_SUCCESS_RESPONSE)
+            .map_err(|_| out_of_return_memory!())?;
         Ok(())
     } else {
-        Err(
-            interface_error!(PointEvaluationInterfaceError::PairingMismatch),
-        )
+        Err(interface_error!(
+            PointEvaluationInterfaceError::PairingMismatch
+        ))
     }
 }
 

@@ -23,7 +23,7 @@ fn run_transactions_as_eoa(
         B160::from_be_bytes(eoa_address.0 .0),
         U256::from(1_000_000_000_000_000_u64),
     );
-    chain.run_block(encoded_txs, None, None)
+    chain.run_block(encoded_txs, None, None, None)
 }
 
 fn address_to_bytecodehash_key(address: &alloy::primitives::Address) -> Bytes32 {

@@ -459,6 +459,7 @@ fn run_block_with_prefetch(
     let run_config = rig::chain::RunConfig {
         witness_output_file: output_path,
         only_forward,
+        only_forward,
         app: Some("evm_replay".to_string()),
         check_storage_diff_hashes: true,
         profiler_config,
@@ -472,6 +473,7 @@ fn run_block_with_prefetch(
         chain.run_block_with_extra_stats(
             transactions,
             Some(block_context),
+            None,
             Some(run_config),
             &mut NopTracer::default(),
         )
@@ -1250,6 +1252,10 @@ pub fn live_run(
             stats.blocks_skipped_trace_fetch,
             stats.failures
         );
+        send_slack(webhook, &msg)?
+    }
+    if let Some(webhook) = webhook.as_ref() {
+        let msg = format!(":white_check_mark: eth_runner: finished running from block {start_block} to {end_block} on chain with id {chain_id} successfully!");
         send_slack(webhook, &msg)?
     }
     Ok(())

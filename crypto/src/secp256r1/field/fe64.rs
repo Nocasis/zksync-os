@@ -83,7 +83,19 @@ impl FieldElement {
     }
 
     pub(crate) fn overflow(&self) -> bool {
-        MODULUS <= self.0
+        for i in (0..4).rev() {
+            let modulus = &MODULUS[i];
+            let value = &self.0[i];
+
+            if modulus > value {
+                return false;
+            } else if modulus < value {
+                return true;
+            }
+        }
+
+        // value == MODULUS
+        true
     }
 
     pub(crate) const fn add(&self, other: &Self) -> Self {

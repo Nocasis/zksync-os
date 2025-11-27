@@ -22,8 +22,9 @@ use zk_ee::{
     system::{errors::internal::InternalError, logger::Logger, Resources, *},
 };
 
-mod da_commitment_generator;
+pub mod da_commitment_generator;
 mod io_subsystem;
+pub mod pubdata;
 mod public_input;
 
 pub use self::io_subsystem::*;

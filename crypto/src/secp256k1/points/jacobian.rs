@@ -12,7 +12,7 @@ pub(crate) struct JacobianConst {
 impl JacobianConst {
     pub(crate) const INFINITY: Self = Self {
         x: FieldElementConst::ZERO,
-        y: FieldElementConst::ZERO,
+        y: FieldElementConst::ONE,
         z: FieldElementConst::ZERO,
     };
 
@@ -38,7 +38,7 @@ impl JacobianConst {
     }
 
     pub(crate) const fn is_infinity(&self) -> bool {
-        self.z.normalizes_to_zero() || (self.y.normalizes_to_zero() && self.x.normalizes_to_zero())
+        self.z.normalizes_to_zero()
     }
 
     pub(crate) const fn to_affine_const(self) -> AffineConst {
@@ -186,7 +186,7 @@ pub(crate) struct Jacobian {
 impl Jacobian {
     pub(crate) const INFINITY: Self = Self {
         x: FieldElement::ZERO,
-        y: FieldElement::ZERO,
+        y: FieldElement::ONE,
         z: FieldElement::ZERO,
     };
 
@@ -209,7 +209,7 @@ impl Jacobian {
     }
 
     pub(crate) fn is_infinity(&self) -> bool {
-        self.z.normalizes_to_zero() || (self.y.normalizes_to_zero() && self.x.normalizes_to_zero())
+        self.z.normalizes_to_zero()
     }
 
     pub(crate) fn to_affine(self) -> Affine {
@@ -487,10 +487,44 @@ mod tests {
     use super::JacobianConst;
 
     #[test]
-    fn test_add_basic() {
-        #[cfg(feature = "bigint_ops")]
-        crate::secp256k1::init();
+    fn test_infinity_check() {
+        // Check that the infinity constant is infinity
+        let inf = Jacobian::INFINITY;
+        assert!(inf.is_infinity());
+        let inf = JacobianConst::INFINITY;
+        assert!(inf.is_infinity());
 
+        // (1, 1, 0) is infinity
+        let ooz = Jacobian {
+            x: FieldElement::ONE,
+            y: FieldElement::ONE,
+            z: FieldElement::ZERO,
+        };
+        assert!(ooz.is_infinity());
+        let ooz = JacobianConst {
+            x: FieldElementConst::ONE,
+            y: FieldElementConst::ONE,
+            z: FieldElementConst::ZERO,
+        };
+        assert!(ooz.is_infinity());
+
+        // (1, 1, 0) isn't infinity
+        let zzo = Jacobian {
+            x: FieldElement::ZERO,
+            y: FieldElement::ZERO,
+            z: FieldElement::ONE,
+        };
+        assert!(!zzo.is_infinity());
+        let zzo = JacobianConst {
+            x: FieldElementConst::ZERO,
+            y: FieldElementConst::ZERO,
+            z: FieldElementConst::ONE,
+        };
+        assert!(!zzo.is_infinity());
+    }
+
+    #[test]
+    fn test_add_basic() {
         let g = Affine::GENERATOR;
         let mut a = Jacobian::INFINITY;
         a.add_ge_in_place(Affine::INFINITY, None);
@@ -529,9 +563,6 @@ mod tests {
 
     #[test]
     fn test_repeated_add() {
-        #[cfg(feature = "bigint_ops")]
-        crate::secp256k1::init();
-
         let g = Affine::GENERATOR;
 
         let mut p = g.to_jacobian();
@@ -575,9 +606,6 @@ mod tests {
     #[cfg(feature = "secp256k1-static-context")]
     #[test]
     fn test_double() {
-        #[cfg(feature = "bigint_ops")]
-        crate::secp256k1::init();
-
         use crate::secp256k1::context::ECRECOVER_CONTEXT;
 
         // tt = 8G
@@ -598,9 +626,6 @@ mod tests {
 
     #[test]
     fn test_add_zinv() {
-        #[cfg(feature = "bigint_ops")]
-        crate::secp256k1::init();
-
         proptest!(|(a: Jacobian, b: Jacobian)| {
             let mut t = a;
             t.add_zinv_in_place(Affine { x: b.x, y: b.y, infinity: false}, &b.z);

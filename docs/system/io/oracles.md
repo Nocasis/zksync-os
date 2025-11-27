@@ -54,7 +54,7 @@ The core query ID definitions can be found in [`query_ids.rs`](../../../zk_ee/sr
 
 #### Block/Batch Queries (0x40070000)
 - **BLOCK_METADATA_QUERY_ID** (`0x40070000`): Retrieves block metadata (timestamp, number, etc.)
-- **ZK_PROOF_DATA_INIT_QUERY_ID** (`0x40070001`): Gets data required for state correctness proving
+- **PROOF_DATA_INIT_QUERY_ID** (`0x40070001`): Gets data required for state correctness proving
 
 #### Storage and State Queries (0x40030000, 0x40040000)
 - **INITIAL_STORAGE_SLOT_VALUE_QUERY_ID** (`0x40030000`): Gets the initial value of a storage slot before modifications
@@ -65,6 +65,7 @@ The core query ID definitions can be found in [`query_ids.rs`](../../../zk_ee/sr
 
 #### Computational Advice Queries (0x40050000)
 - **MODEXP_ADVICE_QUERY_ID** (`0x40050010`): Provides computational advice for modular exponentiation operations
+- **BLOB_COMMITMENT_AND_PROOF_QUERY_ID** (`0x40050020`): Provides computational advice for blob kzg commitment calculation
 
 ### STF-specific Oracle Queries
 

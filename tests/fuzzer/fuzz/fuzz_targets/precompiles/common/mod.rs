@@ -70,6 +70,7 @@ pub fn run_precompile(id: &str, input: &[u8]) -> BlockOutput {
     chain.run_block(
         vec![direct_tx, forwarded_tx],
         Some(block_context),
+        None,
         Some(run_config),
     )
 }

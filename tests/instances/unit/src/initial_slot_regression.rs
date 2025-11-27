@@ -14,13 +14,16 @@ use rig::basic_system::system_implementation::flat_storage_model::{
 };
 use rig::chain::TestingOracleFactory;
 use rig::forward_system::run::query_processors::{
-    BlockMetadataResponder, GenericPreimageResponder, TxDataResponder, ZKProofDataResponder,
+    BlockMetadataResponder, DACommitmentSchemeResponder, GenericPreimageResponder, TxDataResponder,
+    ZKProofDataResponder,
 };
 use rig::forward_system::run::test_impl::{InMemoryPreimageSource, InMemoryTree};
 use rig::forward_system::run::ReadStorage;
 use rig::oracle_provider::{MemorySource, OracleQueryProcessor, ZkEENonDeterminismSource};
 use rig::ruint::aliases::B160;
-use rig::zk_ee::common_structs::{derive_flat_storage_key, ProofData};
+use rig::zk_ee::common_structs::{
+    da_commitment_scheme::DACommitmentScheme, derive_flat_storage_key, ProofData,
+};
 use rig::zk_ee::oracle::basic_queries::InitialStorageSlotQuery;
 use rig::zk_ee::oracle::simple_oracle_query::SimpleOracleQuery;
 use rig::zk_ee::oracle::usize_serialization::dyn_usize_iterator::DynUsizeIterator;
@@ -128,6 +131,7 @@ impl TestingOracleFactory<false> for InvalidInitialValueOracleFactory {
         preimage_source: InMemoryPreimageSource,
         tx_source: TxListSource,
         proof_data: Option<ProofData<FlatStorageCommitment<{ TREE_HEIGHT }>>>,
+        da_commitment_scheme: Option<DACommitmentScheme>,
         _add_uart: bool,
     ) -> ZkEENonDeterminismSource<M> {
         // Create a malicious oracle manually instead of using the default factory
@@ -146,12 +150,17 @@ impl TestingOracleFactory<false> for InvalidInitialValueOracleFactory {
 
         let zk_proof_data_responder = ZKProofDataResponder { data: proof_data };
 
+        let da_commitment_scheme_responder = DACommitmentSchemeResponder {
+            da_commitment_scheme: da_commitment_scheme,
+        };
+
         let mut oracle = ZkEENonDeterminismSource::default();
         oracle.add_external_processor(block_metadata_responder);
         oracle.add_external_processor(tx_data_responder);
         oracle.add_external_processor(preimage_responder);
         oracle.add_external_processor(malicious_storage_responder);
         oracle.add_external_processor(zk_proof_data_responder);
+        oracle.add_external_processor(da_commitment_scheme_responder);
 
         oracle
     }
@@ -207,5 +216,5 @@ fn test_initial_slot_value_assertion() {
     // This should panic with "initial value of empty slot must be trivial"
     // when the oracle returns invalid initial values for empty storage slots
     let _result =
-        chain.run_block_with_oracle_factory(vec![encoded_tx], None, None, &malicious_factory);
+        chain.run_block_with_oracle_factory(vec![encoded_tx], None, None, None, &malicious_factory);
 }
