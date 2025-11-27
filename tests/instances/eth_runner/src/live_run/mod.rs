@@ -459,7 +459,6 @@ fn run_block_with_prefetch(
     let run_config = rig::chain::RunConfig {
         witness_output_file: output_path,
         only_forward,
-        only_forward,
         app: Some("evm_replay".to_string()),
         check_storage_diff_hashes: true,
         profiler_config,
