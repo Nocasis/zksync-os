@@ -605,6 +605,7 @@ fn run_block_with_prefetch(
             
             // If this is a zero address balance error, save traces to file for reproduction
             // Check for the zero address hex string in the error message
+            // TODO: TO BE REMOVED
             if let PostCheckError::Internal { msg } = &e {
                 if msg.contains("Balance for 0000000000000000000000000000000000000000") {
                     if let Err(save_err) = save_traces_for_reproduction(block_number, &traces_clone) {
@@ -696,6 +697,7 @@ struct RunStatistics {
     prefetch_misses: u64,
     total_blocks_prefetched: u64,
     failures: usize,
+    critical_failures: usize, // Failures that count towards MAX_FAILURES (excludes "Reference must have write for account" errors)
 }
 
 impl RunStatistics {
@@ -711,6 +713,7 @@ impl RunStatistics {
             prefetch_misses: 0,
             total_blocks_prefetched: 0,
             failures: 0,
+            critical_failures: 0,
         }
     }
 }
@@ -964,32 +967,47 @@ fn handle_block_result(
         }
         std::result::Result::Ok(BlockStatus::Error(e)) => {
             stats.failures += 1;
-            let webhook_start = Instant::now();
-            if let Some(webhook) = webhook {
-                let machine_info = get_machine_info();
-                let msg = format!(
-                    ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed\n\
-                    \n\
-                    *Block Number:* {block_number}\n\
-                    *Chain ID:* {chain_id}\n\
-                    \n\
-                    *Machine Info:*\n\
-                    {machine_info}\n\
-                    \n\
-                    *Error:*\n\
-                    {e:?}"
-                );
-                send_slack(webhook, &msg)?;
-            }
-            stats.total_overhead_time += webhook_start.elapsed();
             
-            if stats.failures == MAX_FAILURES {
-                error!("Reached max number of failures ({MAX_FAILURES}), stopping execution");
-                return Err(anyhow!("Reached max number of failures ({MAX_FAILURES})"));
+            // Check if this is a "Reference must have write for account" error
+            let should_skip_webhook = if let PostCheckError::Internal { msg } = &e {
+                msg.contains("Reference must have write for account")
+            } else {
+                false
+            };
+            
+            if should_skip_webhook {
+                warn!("Block {block_number} failed with 'Reference must have write for account' error: {e:?}");
+                // Don't count this towards critical failures (MAX_FAILURES check)
+            } else {
+                stats.critical_failures += 1;
+                let webhook_start = Instant::now();
+                if let Some(webhook) = webhook {
+                    let machine_info = get_machine_info();
+                    let msg = format!(
+                        ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed\n\
+                        \n\
+                        *Block Number:* {block_number}\n\
+                        *Chain ID:* {chain_id}\n\
+                        \n\
+                        *Machine Info:*\n\
+                        {machine_info}\n\
+                        \n\
+                        *Error:*\n\
+                        {e:?}"
+                    );
+                    send_slack(webhook, &msg)?;
+                }
+                stats.total_overhead_time += webhook_start.elapsed();
+            }
+            
+            if stats.critical_failures == MAX_FAILURES {
+                error!("Reached max number of critical failures ({MAX_FAILURES}), stopping execution");
+                return Err(anyhow!("Reached max number of critical failures ({MAX_FAILURES})"));
             }
         }
         std::result::Result::Err(e) => {
             stats.failures += 1;
+            stats.critical_failures += 1;
             error!("Block {block_number} failed with error: {e:?}");
             let webhook_start = Instant::now();
             if let Some(webhook) = webhook {
@@ -1010,9 +1028,9 @@ fn handle_block_result(
             }
             stats.total_overhead_time += webhook_start.elapsed();
             
-            if stats.failures == MAX_FAILURES {
-                error!("Reached max number of failures ({MAX_FAILURES}), stopping execution");
-                return Err(anyhow!("Reached max number of failures ({MAX_FAILURES})"));
+            if stats.critical_failures == MAX_FAILURES {
+                error!("Reached max number of critical failures ({MAX_FAILURES}), stopping execution");
+                return Err(anyhow!("Reached max number of critical failures ({MAX_FAILURES})"));
             }
         }
     }
@@ -1040,7 +1058,7 @@ fn log_run_statistics(
     info!("Blocks skipped (already succeeded): {}", stats.blocks_skipped_already_succeeded);
     info!("Blocks skipped (trace fetch failed): {}", stats.blocks_skipped_trace_fetch);
     info!("Blocks skipped (other): {}", blocks_in_range as u64 - stats.blocks_actually_processed - stats.blocks_skipped_already_succeeded - stats.blocks_skipped_trace_fetch);
-    info!("Failures: {}", stats.failures);
+    info!("Failures: {} ({} critical)", stats.failures, stats.critical_failures);
     info!("");
     info!("=== Timing Breakdown ===");
     info!("  Initialization:      {:6.2}ms ({:5.1}%)", init_time.as_secs_f64() * 1000.0, init_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
@@ -1242,14 +1260,15 @@ pub fn live_run(
             *Blocks Processed:* {}\n\
             *Blocks Skipped (already succeeded):* {}\n\
             *Blocks Skipped (trace fetch failed):* {}\n\
-            *Failures:* {}\n\
+            *Failures:* {} ({} critical)\n\
             \n\
             *Machine Info:*\n\
             {machine_info}",
             stats.blocks_actually_processed,
             stats.blocks_skipped_already_succeeded,
             stats.blocks_skipped_trace_fetch,
-            stats.failures
+            stats.failures,
+            stats.critical_failures
         );
         send_slack(webhook, &msg)?
     }
