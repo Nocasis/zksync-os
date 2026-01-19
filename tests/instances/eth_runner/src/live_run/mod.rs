@@ -2,12 +2,15 @@ use alloy::primitives::U256;
 use anyhow::{anyhow, Context, Ok, Result};
 mod db;
 mod rpc;
+mod utils;
+mod statistics;
 use db::{BlockStatus, BlockTraces, Database, ResourceInfo};
 use rig::log::{debug, error, info, warn};
 use rig::Chain;
 use std::time::Instant;
-use std::fs;
-use std::path::Path;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::Ordering;
+use statistics::RunStatistics;
 use zk_ee::system::tracer::NopTracer;
 
 use crate::calltrace::CallTrace;
@@ -18,147 +21,9 @@ use crate::{
     prestate::{DiffTrace, PrestateTrace},
     receipts::TransactionReceipt,
 };
-use reqwest::blocking::Client;
-use std::backtrace::Backtrace;
-use std::panic;
-use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
-const N_PREV_BLOCKS: usize = 256;
+
 const MAX_FAILURES: usize = 10;
 const PREFETCH_SIZE: usize = 4; // Prefetch size (8 * 5 = 40 RPC calls, under 50 req/s limit)
-
-// Global variable to track current block number for panic handler
-static CURRENT_BLOCK_NUMBER: AtomicU64 = AtomicU64::new(0);
-
-fn send_slack(webhook: &str, text: &str) -> Result<()> {
-    let resp = Client::new()
-        .post(webhook)
-        .json(&serde_json::json!({ "text": text }))
-        .send()?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("slack webhook returned {}", resp.status()));
-    }
-    Ok(())
-}
-
-fn get_machine_info() -> String {
-    let mut info = Vec::new();
-    
-    // Hostname from environment variable
-    if let std::result::Result::Ok(hostname) = std::env::var("HOSTNAME") {
-        info.push(format!("Hostname: {}", hostname));
-    }
-    
-    // Process number from environment variable
-    if let std::result::Result::Ok(proc_num) = std::env::var("PROC_NUM") {
-        info.push(format!("Process Number: {}", proc_num));
-    }
-    
-    // Process info
-    info.push(format!("PID: {}", std::process::id()));
-    
-    info.join("\n")
-}
-
-fn install_panic_hook(webhook: Option<String>) {
-    panic::set_hook(Box::new(move |info| {
-        let current_block = CURRENT_BLOCK_NUMBER.load(Ordering::Relaxed);
-        let machine_info = get_machine_info();
-        let backtrace = Backtrace::force_capture();
-        
-        let msg = format!(
-            ":rotating_light: eth-runner panicked\n\
-            \n\
-            *Block Number:* {}\n\
-            \n\
-            *Machine Info:*\n\
-            {}\n\
-            \n\
-            *Panic Info:*\n\
-            {}\n\
-            \n\
-            *Backtrace:*\n\
-            {}",
-            if current_block == 0 { "Unknown".to_string() } else { current_block.to_string() },
-            machine_info,
-            info,
-            backtrace
-        );
-        
-        // Always print to stderr
-        info!("{msg}");
-        
-        // Only send to Slack if webhook is provided
-        if let Some(webhook_url) = &webhook {
-            let _ = send_slack(webhook_url, &msg);
-        }
-    }));
-}
-
-// Fetches hashes for the N_PREV_BLOCKS previous to [start_block].
-// Persists them in DB.
-// Uses batched RPC call to fetch all missing hashes in a single request.
-fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result<()> {
-    let first = start_block.saturating_sub(N_PREV_BLOCKS as u64);
-    
-    // Collect all block numbers that need to be fetched
-    let mut blocks_to_fetch = Vec::new();
-    for n in first..start_block {
-        if db.get_block_hash(n)?.is_none() {
-            blocks_to_fetch.push(n);
-        } else {
-            debug!("Block hash for {n} already in DB, skipping");
-        }
-    }
-    
-    if blocks_to_fetch.is_empty() {
-        debug!("All block hashes already in DB, skipping fetch");
-        return Ok(());
-    }
-    
-    debug!("Fetching {} block hashes in batched RPC call", blocks_to_fetch.len());
-    
-    // Fetch all missing hashes in a single batched RPC call
-    let hashes = rpc::get_block_hashes_batch(endpoint, &blocks_to_fetch)
-        .context(format!("Failed to fetch block hashes in batch"))?;
-    
-    // Save all hashes to DB
-    let blocks_count = blocks_to_fetch.len();
-    for block_num in blocks_to_fetch {
-        if let Some(hash) = hashes.get(&block_num) {
-            db.set_block_hash(block_num, U256::from_be_bytes(hash.0))?;
-            debug!("Saved block hash for block {block_num}: {hash:#x}");
-        } else {
-            return Err(anyhow!("Missing hash for block {block_num} in batched response"));
-        }
-    }
-    
-    // Flush all block hash writes after batching
-    let flush_start = Instant::now();
-    db.flush()?;
-    let flush_time = flush_start.elapsed();
-    debug!("Flushed {} block hashes in {:.2}ms", blocks_count, flush_time.as_secs_f64() * 1000.0);
-    
-    Ok(())
-}
-
-// Constructs the array of previous N_PREV_BLOCKS block hashes from
-// database.
-fn get_block_hashes_array(block_number: u64, db: &Database) -> Result<[U256; N_PREV_BLOCKS]> {
-    let mut hashes = [U256::ZERO; N_PREV_BLOCKS];
-    // Add values for most recent blocks
-    for offset in 1..=N_PREV_BLOCKS {
-        if let Some(hash) = db.get_block_hash(block_number - (offset as u64))? {
-            hashes[N_PREV_BLOCKS - offset] = U256::from(hash);
-        } else {
-            return Err(anyhow!(format!(
-                "DB should have hash for block {}",
-                block_number
-            )));
-        }
-    }
-    Ok(hashes)
-}
 
 // Does not persist the traces.
 fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Result<BlockTraces> {
@@ -193,44 +58,6 @@ fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Resul
     }
 }
 
-/// Fetches block traces for multiple blocks in a single batched HTTP request.
-/// Saves block traces to a file for reproduction when a zero address balance error occurs.
-fn save_traces_for_reproduction(block_number: u64, traces: &BlockTraces) -> Result<()> {
-    let debug_dir = Path::new("debug_reproduction");
-    fs::create_dir_all(debug_dir)?;
-    
-    // Serialize traces to JSON
-    let json_data = serde_json::to_string_pretty(traces)
-        .context("Failed to serialize traces to JSON")?;
-    
-    // Compute SHA-256 hash of the JSON data for verification
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(json_data.as_bytes());
-    hasher.update(block_number.to_be_bytes());
-    let hash = hasher.finalize();
-    let hash_hex = hex::encode(hash);
-    
-    // Save with block number, timestamp, and hash
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let filename = format!("block_{}_zero_addr_error_{}_{}.json", block_number, timestamp, &hash_hex[..8]);
-    let filepath = debug_dir.join(&filename);
-    
-    fs::write(&filepath, &json_data)
-        .context(format!("Failed to write traces to {}", filepath.display()))?;
-    
-    info!("Saved block traces for reproduction: {} (hash: {})", filepath.display(), hash_hex);
-    
-    // Also save a hash file for quick reference
-    let hash_file = debug_dir.join(format!("block_{}_hash.txt", block_number));
-    fs::write(&hash_file, format!("Block: {}\nHash: {}\nFile: {}\n", block_number, hash_hex, filename))
-        .context(format!("Failed to write hash file to {}", hash_file.display()))?;
-    
-    Ok(())
-}
 
 /// Returns a HashMap mapping block_number -> BlockTraces.
 /// Blocks already in DB are skipped and returned from cache.
@@ -305,34 +132,6 @@ type GpuSharedState<'a> = rig::cli_lib::prover_utils::GpuSharedState<'a>;
 #[cfg(not(feature = "proving"))]
 type GpuSharedState = ();
 
-#[allow(clippy::too_many_arguments, unused_variables)]
-fn run_block(
-    block_number: u64,
-    db: &Database,
-    endpoint: &str,
-    witness_output_dir: Option<String>,
-    persist_all: bool,
-    chain_id: u64,
-    single_tx: Option<u64>,
-    gpu_shared_state: &mut Option<&mut GpuSharedState>,
-    only_forward: bool,
-    profile: Option<String>,
-) -> Result<BlockStatus> {
-    let block_traces = fetch_block_traces(block_number, db, endpoint)?;
-    run_block_with_prefetch(
-        block_number,
-        db,
-        endpoint,
-        witness_output_dir,
-        persist_all,
-        chain_id,
-        single_tx,
-        gpu_shared_state,
-        only_forward,
-        profile,
-        block_traces,
-    )
-}
 
 /// Runs a block using prefetched traces.
 #[allow(clippy::too_many_arguments, unused_variables)]
@@ -423,7 +222,7 @@ fn run_block_with_prefetch(
     chain.set_last_block_number(block_number - 1);
 
     let db_hash_start = Instant::now();
-    chain.set_block_hashes(get_block_hashes_array(block_number, db)?);
+    chain.set_block_hashes(utils::get_block_hashes_array(block_number, db)?);
     let db_hash_time = db_hash_start.elapsed();
 
     let prestate_start = Instant::now();
@@ -603,17 +402,6 @@ fn run_block_with_prefetch(
             // TODO: avoid persisting when read from cache.
             db.set_block_traces(block_number, &traces_clone)?;
             
-            // If this is a zero address balance error, save traces to file for reproduction
-            // Check for the zero address hex string in the error message
-            // TODO: TO BE REMOVED
-            if let PostCheckError::Internal { msg } = &e {
-                if msg.contains("Balance for 0000000000000000000000000000000000000000") {
-                    if let Err(save_err) = save_traces_for_reproduction(block_number, &traces_clone) {
-                        warn!("Failed to save traces for reproduction: {}", save_err);
-                    }
-                }
-            }
-            
             // Flush status and traces writes
             let post_flush_start = Instant::now();
             db.flush()?;
@@ -629,95 +417,12 @@ fn run_block_with_prefetch(
     }
 }
 
-#[allow(clippy::too_many_arguments, unused_variables)]
-fn run_block_with_retries(
-    block_number: u64,
-    db: &Database,
-    endpoint: &str,
-    witness_output_dir: Option<String>,
-    persist_all: bool,
-    chain_id: u64,
-    single_tx: Option<u64>,
-    gpu_shared_state: &mut Option<&mut GpuSharedState>,
-    only_forward: bool,
-    backup_endpoint: Option<&String>,
-    profile: Option<String>,
-) -> Result<BlockStatus> {
-    const MAX_RETRIES: usize = 3;
 
-    for attempt in 1..=MAX_RETRIES {
-        let endpoint = if attempt == 1 {
-            endpoint
-        } else if let Some(backup) = backup_endpoint {
-            warn!("Switching to backup endpoint for block {block_number} on attempt {attempt}");
-            backup.as_str()
-        } else {
-            endpoint
-        };
-        match run_block(
-            block_number,
-            db,
-            endpoint,
-            witness_output_dir.clone(), // avoid moving on first attempt
-            persist_all,
-            chain_id,
-            single_tx,
-            gpu_shared_state,
-            only_forward,
-            profile.clone(), // Clone to avoid moving on first attempt
-        ) {
-            core::result::Result::Ok(BlockStatus::Success) => return Ok(BlockStatus::Success),
-            e if attempt < MAX_RETRIES => {
-                warn!(
-                    "Block {block_number} failed on attempt {attempt}/{MAX_RETRIES} with {e:?}, retrying..."
-                );
-            }
-            e => {
-                warn!("Block {block_number} failed after {MAX_RETRIES} attempts with {e:?}");
-                return e;
-            }
-        }
-    }
-
-    unreachable!()
-}
-
+/// Prefetches the next batch of block traces using batched RPC calls.
 ///
-/// Run blocks from [start_block] to [end_block].
-///
-#[allow(clippy::too_many_arguments)]
-struct RunStatistics {
-    total_block_time: std::time::Duration,
-    total_overhead_time: std::time::Duration,
-    total_prefetch_time: std::time::Duration,
-    blocks_actually_processed: u64,
-    blocks_skipped_trace_fetch: u64,
-    blocks_skipped_already_succeeded: u64,
-    prefetch_hits: u64,
-    prefetch_misses: u64,
-    total_blocks_prefetched: u64,
-    failures: usize,
-    critical_failures: usize, // Failures that count towards MAX_FAILURES (excludes "Reference must have write for account" errors)
-}
-
-impl RunStatistics {
-    fn new() -> Self {
-        Self {
-            total_block_time: std::time::Duration::ZERO,
-            total_overhead_time: std::time::Duration::ZERO,
-            total_prefetch_time: std::time::Duration::ZERO,
-            blocks_actually_processed: 0,
-            blocks_skipped_trace_fetch: 0,
-            blocks_skipped_already_succeeded: 0,
-            prefetch_hits: 0,
-            prefetch_misses: 0,
-            total_blocks_prefetched: 0,
-            failures: 0,
-            critical_failures: 0,
-        }
-    }
-}
-
+/// Fetches up to `PREFETCH_SIZE` blocks (default: 4) in a single batched HTTP request and stores
+/// them in the cache. This reduces network latency by batching requests and having traces ready
+/// when needed. Only prefetches when the cache is empty and skips blocks already in the database.
 fn prefetch_next_batch(
     next_block_to_prefetch: &mut u64,
     end_block: u64,
@@ -901,7 +606,7 @@ fn fetch_block_traces_with_backup(
                     // Both endpoints failed - send webhook notification and skip block
                     stats.blocks_skipped_trace_fetch += 1;
                     if let Some(webhook) = webhook {
-                        let machine_info = get_machine_info();
+                        let machine_info = utils::get_machine_info();
                         let msg = format!(
                             ":rotating_light: eth_runner: Failed to fetch traces for block {block_number} on chain with id {chain_id}\n\
                             \n\
@@ -914,7 +619,7 @@ fn fetch_block_traces_with_backup(
                             *Error:*\n\
                             {e:?}"
                         );
-                        if let Err(webhook_err) = send_slack(webhook, &msg) {
+                        if let Err(webhook_err) = utils::send_slack(webhook, &msg) {
                             warn!("Failed to send webhook notification: {}", webhook_err);
                         }
                     }
@@ -927,7 +632,15 @@ fn fetch_block_traces_with_backup(
                         }
                         std::result::Result::Ok(None) => {
                             // Hash doesn't exist, try to fetch it
-                            match rpc::get_block_hash(primary_endpoint, block_number) {
+                            // Try backup endpoint first if available (since primary already failed for traces)
+                            let hash_result = if let Some(backup) = backup_endpoint {
+                                rpc::get_block_hash(backup, block_number)
+                                    .or_else(|_| rpc::get_block_hash(primary_endpoint, block_number))
+                            } else {
+                                rpc::get_block_hash(primary_endpoint, block_number)
+                            };
+                            
+                            match hash_result {
                                 std::result::Result::Ok(hash) => {
                                     if let Err(hash_err) = db.set_block_hash(block_number, U256::from_be_bytes(hash.0)) {
                                         warn!("Failed to save block hash for {block_number}: {hash_err}");
@@ -939,7 +652,7 @@ fn fetch_block_traces_with_backup(
                                     }
                                 }
                                 std::result::Result::Err(hash_err) => {
-                                    warn!("Failed to fetch block hash for {block_number}: {hash_err}");
+                                    warn!("Failed to fetch block hash for {block_number} from both endpoints: {hash_err}");
                                 }
                             }
                         }
@@ -982,7 +695,7 @@ fn handle_block_result(
                 stats.critical_failures += 1;
                 let webhook_start = Instant::now();
                 if let Some(webhook) = webhook {
-                    let machine_info = get_machine_info();
+                    let machine_info = utils::get_machine_info();
                     let msg = format!(
                         ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed\n\
                         \n\
@@ -995,7 +708,7 @@ fn handle_block_result(
                         *Error:*\n\
                         {e:?}"
                     );
-                    send_slack(webhook, &msg)?;
+                    utils::send_slack(webhook, &msg)?;
                 }
                 stats.total_overhead_time += webhook_start.elapsed();
             }
@@ -1011,7 +724,7 @@ fn handle_block_result(
             error!("Block {block_number} failed with error: {e:?}");
             let webhook_start = Instant::now();
             if let Some(webhook) = webhook {
-                let machine_info = get_machine_info();
+                let machine_info = utils::get_machine_info();
                 let msg = format!(
                     ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed with execution error\n\
                     \n\
@@ -1024,7 +737,7 @@ fn handle_block_result(
                     *Error:*\n\
                     {e:?}"
                 );
-                send_slack(webhook, &msg)?;
+                utils::send_slack(webhook, &msg)?;
             }
             stats.total_overhead_time += webhook_start.elapsed();
             
@@ -1035,62 +748,6 @@ fn handle_block_result(
         }
     }
     Ok(())
-}
-
-fn log_run_statistics(
-    start_block: u64,
-    end_block: u64,
-    chain_id: u64,
-    init_time: std::time::Duration,
-    total_time: std::time::Duration,
-    stats: &RunStatistics,
-) {
-    let blocks_in_range = (end_block - start_block + 1) as f64;
-    let total_overhead_other = total_time
-        .saturating_sub(init_time)
-        .saturating_sub(stats.total_block_time)
-        .saturating_sub(stats.total_overhead_time)
-        .saturating_sub(stats.total_prefetch_time);
-    
-    info!("=== Live Run Completed ===");
-    info!("Blocks in range: {} ({} to {})", blocks_in_range as u64, start_block, end_block);
-    info!("Blocks actually processed: {}", stats.blocks_actually_processed);
-    info!("Blocks skipped (already succeeded): {}", stats.blocks_skipped_already_succeeded);
-    info!("Blocks skipped (trace fetch failed): {}", stats.blocks_skipped_trace_fetch);
-    info!("Blocks skipped (other): {}", blocks_in_range as u64 - stats.blocks_actually_processed - stats.blocks_skipped_already_succeeded - stats.blocks_skipped_trace_fetch);
-    info!("Failures: {} ({} critical)", stats.failures, stats.critical_failures);
-    info!("");
-    info!("=== Timing Breakdown ===");
-    info!("  Initialization:      {:6.2}ms ({:5.1}%)", init_time.as_secs_f64() * 1000.0, init_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-    if stats.blocks_actually_processed > 0 {
-        info!("  Block execution:      {:6.2}ms ({:5.1}%)", stats.total_block_time.as_secs_f64() * 1000.0, stats.total_block_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-        info!("  Per-block overhead:  {:6.2}ms ({:5.1}%)", stats.total_overhead_time.as_secs_f64() * 1000.0, stats.total_overhead_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-        info!("    (webhooks, error handling)");
-        if stats.total_prefetch_time.as_secs_f64() > 0.0 {
-            info!("  Prefetching:          {:6.2}ms ({:5.1}%)", stats.total_prefetch_time.as_secs_f64() * 1000.0, stats.total_prefetch_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-            info!("    Blocks prefetched: {} (avg {:.2}ms per block)", 
-                stats.total_blocks_prefetched,
-                stats.total_prefetch_time.as_secs_f64() * 1000.0 / stats.total_blocks_prefetched.max(1) as f64
-            );
-        }
-        info!("  Other overhead:      {:6.2}ms ({:5.1}%)", total_overhead_other.as_secs_f64() * 1000.0, total_overhead_other.as_secs_f64() / total_time.as_secs_f64() * 100.0);
-        info!("  Total:               {:6.2}ms ({:5.1}%)", total_time.as_secs_f64() * 1000.0, 100.0);
-        info!("");
-        let avg_time_per_block = stats.total_block_time.as_secs_f64() / stats.blocks_actually_processed as f64;
-        let avg_total_per_block = total_time.as_secs_f64() / stats.blocks_actually_processed as f64;
-        info!("=== Per Block Averages ===");
-        info!("  Execution time:      {:.2}ms", avg_time_per_block * 1000.0);
-        info!("  Total time (w/ overhead): {:.2}ms", avg_total_per_block * 1000.0);
-        info!("  Blocks per second:  {:.2}", stats.blocks_actually_processed as f64 / total_time.as_secs_f64());
-        if stats.prefetch_hits + stats.prefetch_misses > 0 {
-            let prefetch_hit_rate = stats.prefetch_hits as f64 / (stats.prefetch_hits + stats.prefetch_misses) as f64 * 100.0;
-            info!("=== Prefetch Statistics ===");
-            info!("  Prefetch hits:       {} ({:.1}%)", stats.prefetch_hits, prefetch_hit_rate);
-            info!("  Prefetch misses:     {} ({:.1}%)", stats.prefetch_misses, 100.0 - prefetch_hit_rate);
-            info!("  Total blocks prefetched: {}", stats.total_blocks_prefetched);
-        }
-    }
-    info!("==========================");
 }
 
 pub fn live_run(
@@ -1110,15 +767,14 @@ pub fn live_run(
     let run_start = Instant::now();
     
     // Install panic hook (with or without webhook)
-    install_panic_hook(webhook.clone());
+    utils::install_panic_hook(webhook.clone());
     
     let init_start = Instant::now();
     let db = Database::init(db_path)?;
     assert!(start_block <= end_block);
-    fetch_block_hashes(start_block, &db, &endpoint)?;
+    utils::fetch_block_hashes(start_block, &db, &endpoint)?;
     let chain_id = rpc::get_chain_id(&endpoint)?;
     let init_time = init_start.elapsed();
-    let mut failures = 0;
     
     info!("=== Live Run Started ===");
     info!("Blocks: {} to {}", start_block, end_block);
@@ -1153,7 +809,7 @@ pub fn live_run(
     
     for n in start_block..=end_block {
         // Update current block number for panic handler
-        CURRENT_BLOCK_NUMBER.store(n, Ordering::Relaxed);
+        utils::CURRENT_BLOCK_NUMBER.store(n, Ordering::Relaxed);
         
         // Prefetch next batch if cache is empty
         prefetch_next_batch(
@@ -1243,10 +899,10 @@ pub fn live_run(
     }
     
     let total_time = run_start.elapsed();
-    log_run_statistics(start_block, end_block, chain_id, init_time, total_time, &stats);
+    statistics::log_run_statistics(start_block, end_block, chain_id, init_time, total_time, &stats);
     
     if let Some(webhook) = webhook.as_ref() {
-        let machine_info = get_machine_info();
+        let machine_info = utils::get_machine_info();
         let (emoji, status_msg) = if stopped_early {
             (":rotating_light:", "stopped early due to max failures")
         } else {
@@ -1270,7 +926,7 @@ pub fn live_run(
             stats.failures,
             stats.critical_failures
         );
-        send_slack(webhook, &msg)?
+        utils::send_slack(webhook, &msg)?
     }
     Ok(())
 }

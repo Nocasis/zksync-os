@@ -18,20 +18,6 @@ fn to_hex(n: u64) -> String {
     format!("0x{n:x}")
 }
 
-/// Fetches the full block data with transactions.
-pub fn get_block(endpoint: &str, block_number: u64) -> Result<Block> {
-    debug!("RPC: get_block({block_number})");
-    let body = json!({
-        "method": "eth_getBlockByNumber",
-        "params": [to_hex(block_number), true],
-        "id": 1,
-        "jsonrpc": "2.0"
-    });
-    let res = send(endpoint, body)?;
-    let block = serde_json::from_str(&res)?;
-    Ok(block)
-}
-
 /// Fetches the block hash.
 pub fn get_block_hash(endpoint: &str, block_number: u64) -> Result<B256> {
     debug!("RPC: get_block_hash({block_number})");
@@ -150,70 +136,6 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
     Ok(all_hashes)
 }
 
-/// Fetches the block receipts.
-pub fn get_receipts(endpoint: &str, block_number: u64) -> Result<BlockReceipts> {
-    debug!("RPC: get_receipts({block_number})");
-    let body = json!({
-        "method": "eth_getBlockReceipts",
-        "params": [to_hex(block_number)],
-        "id": 1,
-        "jsonrpc": "2.0"
-    });
-    let res = send(endpoint, body)?;
-    let v = serde_json::from_str(&res)?;
-    Ok(v)
-}
-
-/// Fetches the prestate trace.
-pub fn get_prestate(endpoint: &str, block_number: u64) -> Result<PrestateTrace> {
-    debug!("RPC: get_prestate({block_number})");
-    let body = json!({
-        "method": "debug_traceBlockByNumber",
-        "params": [to_hex(block_number), { "tracer": "prestateTracer" }],
-        "id": 1,
-        "jsonrpc": "2.0"
-    });
-    let res = send(endpoint, body)?;
-    let v = serde_json::from_str(&res)?;
-    Ok(v)
-}
-
-/// Fetches the diff trace.
-pub fn get_difftrace(endpoint: &str, block_number: u64) -> Result<DiffTrace> {
-    debug!("RPC: get_difftrace({block_number})");
-    let body = json!({
-        "method": "debug_traceBlockByNumber",
-        "params": [to_hex(block_number), {
-            "tracer": "prestateTracer",
-            "tracerConfig": { "diffMode": true }
-        }],
-        "id": 1,
-        "jsonrpc": "2.0"
-    });
-    let res = send(endpoint, body)?;
-    let v = serde_json::from_str(&res)?;
-    Ok(v)
-}
-
-pub fn get_calltrace(endpoint: &str, block_number: u64) -> Result<CallTrace> {
-    debug!("RPC: get_calltrace({block_number})");
-
-    let body = json!({
-        "method": "debug_traceBlockByNumber",
-        "params": [to_hex(block_number), {
-            "tracer": "callTracer",
-        }],
-        "id": 1,
-        "jsonrpc": "2.0"
-    });
-    let res = send(endpoint, body)?;
-
-    let mut de = Deserializer::from_str(&res);
-    de.disable_recursion_limit();
-
-    let calltrace = CallTrace::deserialize(&mut de)?;
-    Ok(calltrace)
-}
 
 pub fn get_chain_id(endpoint: &str) -> Result<u64> {
     debug!("RPC: eth_chainId()");
@@ -233,15 +155,76 @@ pub fn get_chain_id(endpoint: &str) -> Result<u64> {
     Ok(id)
 }
 
+/// Decompresses response body based on Content-Encoding header.
+/// Handles zstd (manual), gzip (auto-decompressed by ureq), and uncompressed.
+fn decompress_response(
+    raw_bytes: Vec<u8>,
+    content_encoding: &str,
+    read_time: std::time::Duration,
+) -> Result<Vec<u8>> {
+    use std::time::Instant;
+    
+    if content_encoding.contains("zstd") {
+        let compressed_size = raw_bytes.len();
+        let decompress_start = Instant::now();
+        
+        use zstd::stream::Decoder;
+        let mut decoder = Decoder::new(&raw_bytes[..])
+            .context("Failed to create zstd decoder")?;
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)
+            .context("Failed to decompress zstd response")?;
+        let decompress_time = decompress_start.elapsed();
+        
+        let space_saved = if decompressed.len() > 0 {
+            (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        debug!("RPC zstd: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
+            read_time.as_secs_f64() * 1000.0,
+            compressed_size,
+            decompress_time.as_secs_f64() * 1000.0,
+            decompressed.len(),
+            space_saved,
+            (read_time + decompress_time).as_secs_f64() * 1000.0
+        );
+        
+        Ok(decompressed)
+    } else {
+        // No compression or gzip (ureq auto-decompresses gzip)
+        // raw_bytes is already decompressed for gzip, or uncompressed for no compression
+        if content_encoding.contains("gzip") {
+            let decompressed_size = raw_bytes.len();
+            debug!("RPC gzip: read={:.2}ms ({} bytes decompressed, compressed size unknown (chunked), auto-decompressed by ureq)",
+                read_time.as_secs_f64() * 1000.0,
+                decompressed_size
+            );
+        } else {
+            debug!("RPC read: {:.2}ms ({} bytes, uncompressed)",
+                read_time.as_secs_f64() * 1000.0,
+                raw_bytes.len()
+            );
+        }
+        Ok(raw_bytes)
+    }
+}
+
+
+
+/// Sends JSON-RPC request to endpoint with retry logic and compression support.
 fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     use std::time::Instant;
-    use std::time::Duration;
-    
-    const MAX_RETRIES: u32 = 5;
-    const INITIAL_RETRY_DELAY_MS: u64 = 100;
     
     let request_size = serde_json::to_string(&body)?.len();
     let network_start = Instant::now();
+    
+    // We need to get the content encoding from the response, so we'll handle it differently
+    // Make the request and process it in one go
+    const MAX_RETRIES: u32 = 5;
+    const INITIAL_RETRY_DELAY_MS: u64 = 100;
+    use std::time::Duration;
     
     let mut last_error = None;
     for attempt in 0..=MAX_RETRIES {
@@ -251,7 +234,6 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
             .send_json(&body)
         {
             Ok(response) => {
-                // Success - continue with response processing
                 let network_time = network_start.elapsed();
                 
                 // Get Content-Encoding header from response
@@ -261,9 +243,7 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "none".to_string());
                 
-                // Note: With ureq 3.x and gzip feature enabled, gzip responses are auto-decompressed
-                // We need to read the body to get the decompressed content
-                // For zstd, we still need to manually decompress
+                // Read response body
                 let read_start = Instant::now();
                 let body = response.into_body();
                 let mut raw_bytes = Vec::new();
@@ -272,68 +252,19 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
                     reader.read_to_end(&mut raw_bytes)?;
                 }
                 let read_time = read_start.elapsed();
-                let raw_size = raw_bytes.len();
                 
                 debug!("RPC raw response: {} bytes, Content-Encoding: '{}'", 
-                    raw_size, content_encoding
+                    raw_bytes.len(), content_encoding
                 );
                 
-                // Note: With ureq 3.x and gzip feature, gzip responses are automatically decompressed
-                // We only need to manually decompress zstd
-                let decompressed_bytes = if content_encoding.contains("zstd") {
-                    let compressed_bytes = raw_bytes;
-                    let compressed_size = compressed_bytes.len();
-                    
-                    // Now decompress (this is the fast CPU part)
-                    let decompress_start = Instant::now();
-                    use zstd::stream::Decoder;
-                    let mut decoder = Decoder::new(&compressed_bytes[..])
-                        .context("Failed to create zstd decoder")?;
-                    let mut decompressed = Vec::new();
-                    decoder.read_to_end(&mut decompressed)
-                        .context("Failed to decompress zstd response")?;
-                    let decompress_time = decompress_start.elapsed();
-                    
-                    let space_saved = if decompressed.len() > 0 {
-                        (1.0 - compressed_size as f64 / decompressed.len() as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    
-                    debug!("RPC zstd: read={:.2}ms ({} bytes compressed), decompress={:.2}ms ({} bytes decompressed, {:.1}% saved), total={:.2}ms", 
-                        read_time.as_secs_f64() * 1000.0,
-                        compressed_size,
-                        decompress_time.as_secs_f64() * 1000.0,
-                        decompressed.len(),
-                        space_saved,
-                        (read_time + decompress_time).as_secs_f64() * 1000.0
-                    );
-                    
-                    decompressed
-                } else {
-                    // No compression or gzip (ureq auto-decompresses gzip)
-                    // raw_bytes is already decompressed for gzip, or uncompressed for no compression
-                    if content_encoding.contains("gzip") {
-                        let decompressed_size = raw_bytes.len();
-                        // Content-Length not available (likely using Transfer-Encoding: chunked)
-                        debug!("RPC gzip: read={:.2}ms ({} bytes decompressed, compressed size unknown (chunked), auto-decompressed by ureq)",
-                        read_time.as_secs_f64() * 1000.0,
-                        decompressed_size
-                    );
-                    } else {
-                        debug!("RPC read: {:.2}ms ({} bytes, uncompressed)",
-                            read_time.as_secs_f64() * 1000.0,
-                            raw_bytes.len()
-                        );
-                    }
-                    raw_bytes
-                };
+                // Decompress if needed
+                let decompressed_bytes = decompress_response(raw_bytes, &content_encoding, read_time)?;
                 
+                // Convert to string
                 let out = String::from_utf8(decompressed_bytes)
                     .context("Response is not valid UTF-8 after decompression")?;
                 
                 let response_size = out.len();
-                
                 debug!("RPC network: {:.2}ms (request: {} bytes, response: {} bytes, encoding: {})",
                     network_time.as_secs_f64() * 1000.0,
                     request_size,
@@ -346,7 +277,7 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
             Err(e) => {
                 last_error = Some(e);
                 if attempt < MAX_RETRIES {
-                    let delay_ms = INITIAL_RETRY_DELAY_MS * (1 << attempt); // Exponential backoff: 100ms, 200ms, 400ms
+                    let delay_ms = INITIAL_RETRY_DELAY_MS * (1 << attempt);
                     warn!("RPC request failed (attempt {}/{}): {}. Retrying in {}ms...", 
                         attempt + 1, 
                         MAX_RETRIES + 1,
@@ -355,7 +286,6 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
                     );
                     std::thread::sleep(Duration::from_millis(delay_ms));
                 } else {
-                    // Last attempt failed
                     break;
                 }
             }
@@ -366,162 +296,38 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     Err(last_error.unwrap().into())
 }
 
-/// Fetches all block traces in a single batched RPC call.
-/// This is much faster than making 5 separate HTTP requests.
-/// TODO: maybe we can reduce amount of RPC calls using https://www.quicknode.com/docs/ethereum/qn_getBlockWithReceipts
+/// Fetches all block traces for a single block in a batched RPC call.
+/// 
+/// This is a convenience wrapper around `get_all_block_traces_batch()` for single blocks.
+/// It's used in error recovery paths and backup endpoint scenarios where we need to fetch
+/// a single block's traces. For prefetching multiple blocks, use `get_all_block_traces_batch()`.
+/// 
+/// Making a single HTTP request with all 5 RPC calls is much faster than making 5 separate HTTP requests.
 pub fn get_all_block_traces(
     endpoint: &str,
     block_number: u64,
 ) -> Result<(Block, PrestateTrace, DiffTrace, BlockReceipts, CallTrace)> {
     debug!("RPC: get_all_block_traces({block_number}) - batched");
     
-    let block_hex = to_hex(block_number);
+    // Use batch function internally for code reuse
+    let mut results = get_all_block_traces_batch(endpoint, &[block_number])?;
     
-    // Create a batched JSON-RPC request with all 5 calls
-    let batch = json!([
-        {
-            "method": "eth_getBlockByNumber",
-            "params": [block_hex.clone(), true],
-            "id": 0,
-            "jsonrpc": "2.0"
-        },
-        {
-            "method": "debug_traceBlockByNumber",
-            "params": [block_hex.clone(), { "tracer": "prestateTracer" }],
-            "id": 1,
-            "jsonrpc": "2.0"
-        },
-        {
-            "method": "debug_traceBlockByNumber",
-            "params": [block_hex.clone(), {
-                "tracer": "prestateTracer",
-                "tracerConfig": { "diffMode": true }
-            }],
-            "id": 2,
-            "jsonrpc": "2.0"
-        },
-        {
-            "method": "eth_getBlockReceipts",
-            "params": [block_hex.clone()],
-            "id": 3,
-            "jsonrpc": "2.0"
-        },
-        {
-            "method": "debug_traceBlockByNumber",
-            "params": [block_hex, {
-                "tracer": "callTracer",
-            }],
-            "id": 4,
-            "jsonrpc": "2.0"
-        }
-    ]);
-    
-    let response = send(endpoint, batch)?;
-    
-    // Parse the batched response - it should be an array of response objects
-    // Use Deserializer with recursion limit disabled to handle large responses
-    let mut de = Deserializer::from_str(&response);
-    de.disable_recursion_limit();
-    let response_value: serde_json::Value = Deserialize::deserialize(&mut de)
-        .context(format!("Failed to parse batched RPC response. Response length: {} bytes", response.len()))?;
-    
-    // Check if it's an array (batched response) or a single object (error)
-    let responses = if response_value.is_array() {
-        response_value.as_array()
-            .ok_or_else(|| anyhow!("Failed to parse response as array"))?
-            .clone()
-    } else {
-        // Single response - might be an error
-        return Err(anyhow!("Expected batched response (array), got single response: {}", response_value));
-    };
-    
-    if responses.len() != 5 {
-        return Err(anyhow!("Expected 5 responses in batch, got {}. Response: {}", responses.len(), response));
-    }
-    
-    // Extract results by ID (they should be in order, but we'll be safe)
-    let mut block_result = None;
-    let mut prestate_result = None;
-    let mut diff_result = None;
-    let mut receipts_result = None;
-    let mut call_result = None;
-    
-    for resp in responses {
-        // Check if it's a valid response object
-        if !resp.is_object() {
-            return Err(anyhow!("Expected response object, got: {}", resp));
-        }
-        
-        let id = resp.get("id")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow!("Missing or invalid id in batch response: {}", resp))?;
-        
-        // Check for errors
-        if let Some(error) = resp.get("error") {
-            return Err(anyhow!("RPC error in batch response (id={}): {}", id, error));
-        }
-        
-        let result = resp.get("result")
-            .ok_or_else(|| anyhow!("Missing result in batch response (id={}). Response object: {}", id, resp))?;
-        
-        match id {
-            0 => block_result = Some(result.clone()),
-            1 => prestate_result = Some(result.clone()),
-            2 => diff_result = Some(result.clone()),
-            3 => receipts_result = Some(result.clone()),
-            4 => call_result = Some(result.clone()),
-            _ => return Err(anyhow!("Unexpected id in batch response: {}", id)),
-        }
-    }
-    
-    // Deserialize each result - need to reconstruct full JSON-RPC response structure
-    // because Block, PrestateTrace, etc. expect the full response wrapper
-    let block_json = json!({
-        "jsonrpc": "2.0",
-        "result": block_result.ok_or_else(|| anyhow!("Missing block result"))?,
-        "id": 0
-    });
-    let block: Block = serde_json::from_value(block_json)?;
-    
-    let prestate_json = json!({
-        "jsonrpc": "2.0",
-        "result": prestate_result.ok_or_else(|| anyhow!("Missing prestate result"))?,
-        "id": 1
-    });
-    let prestate: PrestateTrace = serde_json::from_value(prestate_json)?;
-    
-    let diff_json = json!({
-        "jsonrpc": "2.0",
-        "result": diff_result.ok_or_else(|| anyhow!("Missing diff result"))?,
-        "id": 2
-    });
-    let diff: DiffTrace = serde_json::from_value(diff_json)?;
-    
-    let receipts_json = json!({
-        "jsonrpc": "2.0",
-        "result": receipts_result.ok_or_else(|| anyhow!("Missing receipts result"))?,
-        "id": 3
-    });
-    let receipts: BlockReceipts = serde_json::from_value(receipts_json)?;
-    
-    // CallTrace needs special handling due to recursion limit
-    let call_json = json!({
-        "jsonrpc": "2.0",
-        "result": call_result.ok_or_else(|| anyhow!("Missing call result"))?,
-        "id": 4
-    });
-    let call_str = serde_json::to_string(&call_json)?;
-    let mut de = Deserializer::from_str(&call_str);
-    de.disable_recursion_limit();
-    let call: CallTrace = CallTrace::deserialize(&mut de)?;
-    
-    Ok((block, prestate, diff, receipts, call))
+    results.remove(&block_number)
+        .ok_or_else(|| anyhow!("Batch function did not return result for block {}", block_number))
 }
 
 /// Fetches block traces for multiple blocks in a single batched HTTP request.
-/// This is much faster than fetching blocks one at a time.
+/// 
+/// This is optimized for prefetching multiple blocks efficiently. For single blocks,
+/// use `get_all_block_traces()` which calls this function internally.
+/// 
+/// This is much faster than fetching blocks one at a time because:
+/// - Single HTTP request instead of N requests
+/// - Better network utilization
+/// - Reduced overhead from connection setup
+/// 
 /// Returns a HashMap mapping block_number -> (Block, PrestateTrace, DiffTrace, BlockReceipts, CallTrace).
-/// Only includes successfully fetched blocks in the result.
+/// Only includes successfully fetched blocks in the result (failed blocks are skipped with a warning).
 pub fn get_all_block_traces_batch(
     endpoint: &str,
     block_numbers: &[u64],
