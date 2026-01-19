@@ -20,6 +20,3 @@ tests/instances/**/*.bench
 
 .DS_Store
 .idea
-
-
-zksync_os/*.bin

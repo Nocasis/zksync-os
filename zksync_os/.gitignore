@@ -1,4 +1,6 @@
+// Binaries
 *.elf
+*.bin
 *.text
 app_debug.bin
 /target
