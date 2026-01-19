@@ -13,6 +13,7 @@ pub(crate) static CURRENT_BLOCK_NUMBER: AtomicU64 = AtomicU64::new(0);
 
 const N_PREV_BLOCKS: usize = 256;
 
+/// Sends a message to Slack via webhook.
 pub fn send_slack(webhook: &str, text: &str) -> Result<()> {
     let resp = Client::new()
         .post(webhook)
@@ -24,6 +25,9 @@ pub fn send_slack(webhook: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Collects machine information for logging and notifications.
+///
+/// Returns hostname, process number, and PID from environment variables and system.
 pub fn get_machine_info() -> String {
     let mut info = Vec::new();
     
@@ -43,6 +47,10 @@ pub fn get_machine_info() -> String {
     info.join("\n")
 }
 
+/// Installs a panic hook that logs panic information and optionally sends to Slack.
+///
+/// Captures current block number, machine info, panic message, and backtrace.
+/// Always logs to stderr, sends to Slack only if webhook is provided.
 pub fn install_panic_hook(webhook: Option<String>) {
     panic::set_hook(Box::new(move |info| {
         let current_block = CURRENT_BLOCK_NUMBER.load(Ordering::Relaxed);
@@ -78,9 +86,9 @@ pub fn install_panic_hook(webhook: Option<String>) {
     }));
 }
 
-// Fetches hashes for the N_PREV_BLOCKS previous to [start_block].
-// Persists them in DB.
-// Uses batched RPC call to fetch all missing hashes in a single request.
+/// Fetches block hashes for the N_PREV_BLOCKS previous to start_block.
+///
+/// Persists them in DB. Uses batched RPC call to fetch all missing hashes in a single request.
 pub fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Result<()> {
     use super::rpc;
     
@@ -127,8 +135,10 @@ pub fn fetch_block_hashes(start_block: u64, db: &Database, endpoint: &str) -> Re
     Ok(())
 }
 
-// Constructs the array of previous N_PREV_BLOCKS block hashes from
-// database.
+/// Constructs an array of the previous N_PREV_BLOCKS block hashes from database.
+///
+/// Returns hashes for blocks [block_number - N_PREV_BLOCKS, block_number - 1].
+/// Fails if any required hash is missing from the database.
 pub fn get_block_hashes_array(block_number: u64, db: &Database) -> Result<[U256; N_PREV_BLOCKS]> {
     let mut hashes = [U256::ZERO; N_PREV_BLOCKS];
     // Add values for most recent blocks

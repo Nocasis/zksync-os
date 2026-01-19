@@ -136,7 +136,7 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
     Ok(all_hashes)
 }
 
-
+/// Fetches the chain ID from the RPC endpoint.
 pub fn get_chain_id(endpoint: &str) -> Result<u64> {
     debug!("RPC: eth_chainId()");
 
