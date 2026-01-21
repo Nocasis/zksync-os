@@ -10,7 +10,7 @@ use std::time::Instant;
 /// With PREFETCH_SIZE=4, we make 4*5=20 RPC calls per batch, which is under
 /// the typical rate limit of 50 requests/second. This allows for some headroom
 /// to account for network delays and other overhead.
-const PREFETCH_SIZE: usize = 4;
+const PREFETCH_SIZE: usize = 4;  // Can be adjusted depending on the RPC rate limit, threads, etc.
 
 /// Fetches block traces from database or RPC endpoint.
 ///
@@ -90,7 +90,8 @@ pub fn fetch_block_traces_batch(
 ///
 /// Fetches up to `PREFETCH_SIZE` blocks (default: 4) in a single batched HTTP request and stores
 /// them in the cache. This reduces network latency by batching requests and having traces ready
-/// when needed. Only prefetches when the cache is empty and skips blocks already in the database.
+/// when needed. Only prefetches when the cache is empty and skips blocks already in the database
+/// or blocks that have already been successfully processed (when skip_successful=true).
 pub fn prefetch_next_batch(
     next_block_to_prefetch: &mut u64,
     end_block: u64,
@@ -99,6 +100,7 @@ pub fn prefetch_next_batch(
     prefetch_cache: &mut std::collections::HashMap<u64, BlockTraces>,
     total_prefetch_time: &mut std::time::Duration,
     total_blocks_prefetched: &mut u64,
+    skip_successful: bool,
 ) -> Result<()> {
     if prefetch_cache.is_empty() && *next_block_to_prefetch <= end_block {
         let prefetch_timing_start = Instant::now();
@@ -106,7 +108,21 @@ pub fn prefetch_next_batch(
         
         let prefetch_blocks: Vec<u64> = (*next_block_to_prefetch..=prefetch_range_end)
             .filter(|&block_num| {
-                db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false)
+                // Skip if traces already in DB
+                if !db.get_block_traces(block_num).map(|opt| opt.is_none()).unwrap_or(false) {
+                    return false;
+                }
+                
+                // Skip if block already successfully processed (when skip_successful=true)
+                if skip_successful {
+                    if let Ok(Some(status)) = db.get_block_status(block_num) {
+                        if matches!(status, super::db::BlockStatus::Success) {
+                            return false;
+                        }
+                    }
+                }
+                
+                true
             })
             .collect();
         

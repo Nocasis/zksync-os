@@ -83,6 +83,7 @@ pub fn live_run(
             &mut prefetch_cache,
             &mut stats.total_prefetch_time,
             &mut stats.total_blocks_prefetched,
+            skip_successful,
         )?;
         
         // Check if we should skip this block
