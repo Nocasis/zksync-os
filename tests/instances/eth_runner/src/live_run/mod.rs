@@ -134,23 +134,27 @@ pub fn live_run(
         let block_time = block_start.elapsed();
         stats.total_block_time += block_time;
         
-        // Try backup endpoint if primary execution failed
-        let result = if let Some(backup) = backup_endpoint.as_ref() {
-            error_handling::try_backup_endpoint(
-                n,
-                primary_result,
-                backup,
-                &db,
-                witness_output_dir.clone(),
-                persist_all,
-                chain_id,
-                single_tx,
-                gpu_state,
-                only_forward,
-                &mut stats.total_block_time,
-            )
-        } else {
-            primary_result
+        // Retry block execution with backup endpoint if primary execution failed
+        let result = match primary_result {
+            Ok(BlockStatus::Success) => Ok(BlockStatus::Success),
+            failed_result => {
+                if let Some(backup) = backup_endpoint.as_ref() {
+                    error_handling::retry_block_with_backup_endpoint(
+                        n,
+                        backup,
+                        &db,
+                        witness_output_dir.clone(),
+                        persist_all,
+                        chain_id,
+                        single_tx,
+                        gpu_state,
+                        only_forward,
+                        &mut stats.total_block_time,
+                    )
+                } else {
+                    failed_result
+                }
+            }
         };
         
         // Handle result (update stats, send webhooks, check failures)

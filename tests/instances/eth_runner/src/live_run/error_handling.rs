@@ -13,13 +13,31 @@ use crate::post_check::PostCheckError;
 
 const MAX_FAILURES: usize = 10;
 
-/// Attempts to run a block using a backup endpoint if primary execution failed.
+/// Formats a block failure message for Slack webhook notifications.
+fn format_block_failure_message(block_number: u64, chain_id: u64, error_type: &str, error: &dyn std::fmt::Debug) -> String {
+    let machine_info = utils::get_machine_info();
+    format!(
+        ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} {error_type}\n\
+        \n\
+        *Block Number:* {block_number}\n\
+        *Chain ID:* {chain_id}\n\
+        \n\
+        *Machine Info:*\n\
+        {machine_info}\n\
+        \n\
+        *Error:*\n\
+        {error:?}"
+    )
+}
+
+/// Retries block execution using a backup endpoint after primary execution failed.
 ///
-/// If primary result is successful, returns it immediately. Otherwise fetches traces from
-/// backup endpoint and retries block execution. Updates total_block_time with backup execution time.
-pub fn try_backup_endpoint(
+/// Fetches traces from backup endpoint and retries block execution.
+/// Updates total_block_time with backup execution time.
+///
+/// Note: This function should only be called when primary execution has already failed.
+pub fn retry_block_with_backup_endpoint(
     block_number: u64,
-    primary_result: Result<BlockStatus>,
     backup_endpoint: &str,
     db: &Database,
     witness_output_dir: Option<String>,
@@ -30,10 +48,6 @@ pub fn try_backup_endpoint(
     only_forward: bool,
     total_block_time: &mut std::time::Duration,
 ) -> Result<BlockStatus> {
-    if let std::result::Result::Ok(BlockStatus::Success) = primary_result {
-        return primary_result;
-    }
-    
     warn!("Block {block_number} failed with primary endpoint. Retrying with backup endpoint...");
     
     let backup_traces_result = {
@@ -94,7 +108,8 @@ pub fn try_backup_endpoint(
         }
         std::result::Result::Err(fetch_err) => {
             error!("Failed to fetch traces from backup endpoint for block {block_number}: {fetch_err:?}");
-            primary_result
+            Err(anyhow!("Backup endpoint failed to fetch traces: {fetch_err:?}")
+                .context(format!("Block {} failed with primary endpoint and backup fetch also failed", block_number)))
         }
     }
 }
@@ -242,19 +257,7 @@ pub fn handle_block_result(
                 stats.critical_failures += 1;
                 let webhook_start = Instant::now();
                 if let Some(webhook) = webhook {
-                    let machine_info = utils::get_machine_info();
-                    let msg = format!(
-                        ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed\n\
-                        \n\
-                        *Block Number:* {block_number}\n\
-                        *Chain ID:* {chain_id}\n\
-                        \n\
-                        *Machine Info:*\n\
-                        {machine_info}\n\
-                        \n\
-                        *Error:*\n\
-                        {e:?}"
-                    );
+                    let msg = format_block_failure_message(block_number, chain_id, "failed", &e);
                     utils::send_slack(webhook, &msg)?;
                 }
                 stats.total_overhead_time += webhook_start.elapsed();
@@ -271,19 +274,7 @@ pub fn handle_block_result(
             error!("Block {block_number} failed with error: {e:?}");
             let webhook_start = Instant::now();
             if let Some(webhook) = webhook {
-                let machine_info = utils::get_machine_info();
-                let msg = format!(
-                    ":rotating_light: eth_runner: Block {block_number} on chain with id {chain_id} failed with execution error\n\
-                    \n\
-                    *Block Number:* {block_number}\n\
-                    *Chain ID:* {chain_id}\n\
-                    \n\
-                    *Machine Info:*\n\
-                    {machine_info}\n\
-                    \n\
-                    *Error:*\n\
-                    {e:?}"
-                );
+                let msg = format_block_failure_message(block_number, chain_id, "failed with execution error", &e);
                 utils::send_slack(webhook, &msg)?;
             }
             stats.total_overhead_time += webhook_start.elapsed();

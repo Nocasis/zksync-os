@@ -13,7 +13,7 @@ pub struct RunStatistics {
     pub prefetch_misses: u64,
     pub total_blocks_prefetched: u64,
     pub failures: usize,
-    pub critical_failures: usize, // Failures that count towards MAX_FAILURES (excludes "Reference must have write for account" errors)
+    pub critical_failures: usize, // Failures that count towards MAX_FAILURES
 }
 
 impl RunStatistics {

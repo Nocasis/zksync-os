@@ -4,41 +4,22 @@ use anyhow::{Context, Result};
 use rig::log::{debug, info, warn};
 use std::time::Instant;
 
-const PREFETCH_SIZE: usize = 4; // Prefetch size (4 * 5 = 20 RPC calls, under 50 req/s limit)
+/// Prefetch size: number of blocks to prefetch in one batch.
+///
+/// Each block requires 5 RPC calls (block, prestate, diff, receipts, calltrace).
+/// With PREFETCH_SIZE=4, we make 4*5=20 RPC calls per batch, which is under
+/// the typical rate limit of 50 requests/second. This allows for some headroom
+/// to account for network delays and other overhead.
+const PREFETCH_SIZE: usize = 4;
 
 /// Fetches block traces from database or RPC endpoint.
 ///
 /// Returns traces from database if available, otherwise fetches from RPC using batched calls.
+/// This is a convenience wrapper around `fetch_block_traces_batch` for single blocks.
 pub fn fetch_block_traces(block_number: u64, db: &Database, endpoint: &str) -> Result<BlockTraces> {
-    match db.get_block_traces(block_number)? {
-        Some(traces) => {
-            debug!("Block traces for {block_number} already in DB, skipping");
-            Ok(traces)
-        }
-        None => {
-            let rpc_start = Instant::now();
-            
-            // Use batched RPC call - single HTTP request instead of 5
-            let (block, prestate, diff, receipts, call) = rpc::get_all_block_traces(endpoint, block_number)
-                .context(format!("Failed to fetch block traces for {block_number}"))?;
-            
-            let total_rpc_time = rpc_start.elapsed();
-            
-            debug!("RPC call for block {} (batched): total={:.2}ms",
-                block_number,
-                total_rpc_time.as_secs_f64() * 1000.0
-            );
-            
-            let block_traces = BlockTraces {
-                block,
-                prestate,
-                diff,
-                receipts,
-                call,
-            };
-            Ok(block_traces)
-        }
-    }
+    let mut result = fetch_block_traces_batch(&[block_number], db, endpoint)?;
+    result.remove(&block_number)
+        .ok_or_else(|| anyhow::anyhow!("Block {} not found in batch result", block_number))
 }
 
 /// Returns a HashMap mapping block_number -> BlockTraces.

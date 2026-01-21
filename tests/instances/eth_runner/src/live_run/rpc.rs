@@ -8,10 +8,27 @@ use alloy::primitives::B256;
 use anyhow::{anyhow, Context};
 use anyhow::Result;
 use rig::log::{debug, warn};
-use std::{io::Read, str::FromStr};
+use std::{io::Read, str::FromStr, time::Duration};
 use serde_json::json;
 use serde::Deserialize;
 use serde_json::Deserializer;
+
+// RPC Configuration Constants
+
+/// Number of block hashes to fetch in one batched RPC call in `get_block_hashes_batch`.
+/// Each batch is a single HTTP request containing multiple block hash requests.
+const BATCH_SIZE: usize = 40;
+
+/// Delay between batch requests in `get_block_hashes_batch` to respect rate limits.
+/// Most RPC providers limit to ~50 requests per second. Using 1.1 seconds provides a safety buffer.
+const RATE_LIMIT_DELAY_MS: u64 = 1100;
+
+/// Maximum number of retry attempts for failed RPC requests.
+const MAX_RETRIES: u32 = 5;
+
+/// Initial delay in milliseconds before retrying a failed RPC request.
+/// Subsequent retries use exponential backoff: delay = INITIAL_RETRY_DELAY_MS * (2^attempt).
+const INITIAL_RETRY_DELAY_MS: u64 = 100;
 
 /// Converts u64 to hex string with "0x" prefix.
 fn to_hex(n: u64) -> String {
@@ -44,8 +61,7 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
     if block_numbers.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    
-    const BATCH_SIZE: usize = 40; // Rate limit: 50 requests per second, TODO: adjust this to be more accurate
+
     let mut all_hashes = std::collections::HashMap::new();
     
     debug!("RPC: get_block_hashes_batch({} blocks) - will be chunked into batches of {}", block_numbers.len(), BATCH_SIZE);
@@ -133,13 +149,10 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
             all_hashes.insert(block_num, hash);
         }
         
-        // Add a delay between batches to respect rate limits (50 requests/second)
+        // Add a delay between batches to respect rate limits
         // Only sleep if there are more chunks to process
         if chunk_idx < chunks.len() - 1 {
-            // Wait 1.1 seconds before next batch to respect 50 req/s limit
-            use std::thread;
-            use std::time::Duration;
-            thread::sleep(Duration::from_millis(1100)); // TODO Adjust this to be more accurate
+            std::thread::sleep(Duration::from_millis(RATE_LIMIT_DELAY_MS));
         }
     }
     
@@ -232,10 +245,6 @@ fn send(endpoint: &str, body: serde_json::Value) -> Result<String> {
     
     // We need to get the content encoding from the response, so we'll handle it differently
     // Make the request and process it in one go
-    const MAX_RETRIES: u32 = 5;
-    const INITIAL_RETRY_DELAY_MS: u64 = 100;
-    use std::time::Duration;
-    
     let mut last_error = None;
     for attempt in 0..=MAX_RETRIES {
         match ureq::post(endpoint)

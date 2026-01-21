@@ -16,6 +16,17 @@ use crate::{
     prestate::{DiffTrace, PrestateTrace},
     receipts::TransactionReceipt,
 };
+use std::collections::HashSet;
+
+/// Filters out items at indices that are in the skipped set.
+///
+/// Used to remove skipped transactions from receipts, traces, and other collections.
+fn filter_skipped<T>(items: Vec<T>, skipped: &HashSet<usize>) -> Vec<T> {
+    items.into_iter()
+        .enumerate()
+        .filter_map(|(i, x)| if skipped.contains(&i) { None } else { Some(x) })
+        .collect()
+}
 
 #[cfg(feature = "gpu")]
 pub type GpuSharedState = rig::cli_lib::prover_utils::GpuSharedState;
@@ -50,32 +61,31 @@ pub fn run_block(
         receipts,
         call,
     } = block_traces;
-    // set block hash for future blocks to use
-    db.set_block_hash(
-        block_number,
-        U256::from_be_bytes(block.result.header.hash.0),
-    )?;
+    
     info!("\n ===================");
     info!("Running block: {block_number}");
 
+    // Extract block hash before block is moved by get_transactions()
+    let block_hash = U256::from_be_bytes(block.result.header.hash.0);
+    
     let block_context = block.get_block_context();
     let (transactions, skipped, calls_unsupported_precompile) =
         block.get_transactions(&call, single_tx);
     if calls_unsupported_precompile {
         // Here it makes little sense to run the block, as the post check is gonna fail
         // We just skip it, marking it as successful
-        // Hash already flushed above
+        // Set and flush block hash before returning so future blocks can reference it
+        db.set_block_hash(block_number, block_hash)?;
+        db.flush()?;
         warn!("Skipping block {block_number}, as it calls to an unsupported precompile");
         return Ok(BlockStatus::Success);
     }
+    
+    // Set block hash for future blocks to use
+    db.set_block_hash(block_number, block_hash)?;
     info!("Transactions to run: {}", transactions.len());
 
-    let receipts: Vec<TransactionReceipt> = receipts
-        .result
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, x)| if skipped.contains(&i) { None } else { Some(x) })
-        .collect();
+    let receipts: Vec<TransactionReceipt> = filter_skipped(receipts.result, &skipped);
 
     let total_gas_used = receipts
         .iter()
@@ -83,30 +93,15 @@ pub fn run_block(
     info!("Reference gas used: {total_gas_used}");
 
     let ps_trace = PrestateTrace {
-        result: prestate
-            .result
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, x)| if skipped.contains(&i) { None } else { Some(x) })
-            .collect(),
+        result: filter_skipped(prestate.result, &skipped),
     };
 
     let diff_trace = DiffTrace {
-        result: diff
-            .result
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, x)| if skipped.contains(&i) { None } else { Some(x) })
-            .collect(),
+        result: filter_skipped(diff.result, &skipped),
     };
 
     let calltrace = CallTrace {
-        result: call
-            .result
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, x)| if skipped.contains(&i) { None } else { Some(x) })
-            .collect(),
+        result: filter_skipped(call.result, &skipped),
     };
 
     let setup_start = Instant::now();
