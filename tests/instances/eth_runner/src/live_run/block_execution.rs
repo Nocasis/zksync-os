@@ -128,7 +128,6 @@ pub fn run_block(
         only_forward,
         app: Some("evm_replay".to_string()),
         check_storage_diff_hashes: true,
-        profiler_config: None,
         ..Default::default()
     };
     

@@ -45,7 +45,6 @@ fn run<const RANDOMIZED: bool>(
         only_forward: false,
         app: Some("evm_replay".to_string()),
         check_storage_diff_hashes: true,
-        profiler_config: None,
         ..Default::default()
     };
     let (output, stats, _) = chain
