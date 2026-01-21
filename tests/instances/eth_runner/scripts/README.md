@@ -46,7 +46,3 @@ python3 tests/instances/eth_runner/scripts/overview_logs.py logs_parallel_start_
 # Show recent activity
 python3 tests/instances/eth_runner/scripts/overview_logs.py logs_parallel_start_19299000_end_19300000_procs_20 --show-activity
 ```
-
-### Current Implementation
-
-Currently uses regex parsing of log files. Plan is to move statistics collection to Rust.
