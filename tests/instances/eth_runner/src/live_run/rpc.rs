@@ -91,8 +91,9 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
             return Err(anyhow!("Expected {} responses in batch, got {}. Response: {}", chunk.len(), responses.len(), response));
         }
         
-        // Extract results by ID
-        for (i, resp) in responses.into_iter().enumerate() {
+        // Build a HashMap by response ID to handle out-of-order responses
+        let mut response_map: std::collections::HashMap<usize, serde_json::Value> = std::collections::HashMap::new();
+        for resp in responses.into_iter() {
             // Check if it's a valid response object
             if !resp.is_object() {
                 return Err(anyhow!("Expected response object, got: {}", resp));
@@ -102,8 +103,9 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| anyhow!("Missing or invalid id in batch response: {}", resp))?;
             
-            if id as usize != i {
-                return Err(anyhow!("Unexpected id in batch response: expected {}, got {}", i, id));
+            let id_usize = id as usize;
+            if id_usize >= chunk.len() {
+                return Err(anyhow!("Response id {} is out of range for chunk size {}", id_usize, chunk.len()));
             }
             
             // Check for errors
@@ -111,16 +113,24 @@ pub fn get_block_hashes_batch(endpoint: &str, block_numbers: &[u64]) -> Result<s
                 return Err(anyhow!("RPC error in batch response (id={}): {}", id, error));
             }
             
+            response_map.insert(id_usize, resp);
+        }
+        
+        // Extract results by index, looking up by ID
+        for (i, &block_num) in chunk.iter().enumerate() {
+            let resp = response_map.get(&i)
+                .ok_or_else(|| anyhow!("Missing response for id {} in batch", i))?;
+            
             let result = resp.get("result")
-                .ok_or_else(|| anyhow!("Missing result in batch response (id={}). Response object: {}", id, resp))?;
+                .ok_or_else(|| anyhow!("Missing result in batch response (id={}). Response object: {}", i, resp))?;
             
             // Extract hash from result
             let hash_hex = result.get("hash")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("Missing hash in result for block number {}", chunk[i]))?;
+                .ok_or_else(|| anyhow!("Missing hash in result for block number {}", block_num))?;
             
             let hash = B256::from_str(hash_hex)?;
-            all_hashes.insert(chunk[i], hash);
+            all_hashes.insert(block_num, hash);
         }
         
         // Add a delay between batches to respect rate limits (50 requests/second)

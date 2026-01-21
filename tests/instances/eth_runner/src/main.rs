@@ -49,10 +49,6 @@ enum Command {
         only_forward: bool,
         #[arg(long)]
         backup_endpoint: Option<String>,
-        /// If set, enables profiling and generates flamegraph for each block
-        /// The block number will be appended to the filename (e.g., flamegraph_19299001.svg)
-        #[arg(long)]
-        profile: Option<String>,
     },
     // Run a single block from JSON files
     SingleRun {
@@ -74,9 +70,6 @@ enum Command {
         chain_id: Option<u64>,
         #[arg(long)]
         single_tx: Option<u64>,
-        /// If set, enables profiling and generates flamegraph at the specified path
-        #[arg(long)]
-        profile: Option<String>,
     },
     // Export block ratios from DB
     ExportRatios {
@@ -103,7 +96,6 @@ fn main() -> anyhow::Result<()> {
             witness_output_dir,
             chain_id,
             single_tx,
-            profile,
         } => crate::single_run::single_run(
             block_dir,
             block_hashes,
@@ -111,7 +103,6 @@ fn main() -> anyhow::Result<()> {
             witness_output_dir,
             chain_id,
             single_tx,
-            profile,
         ),
         Command::LiveRun {
             start_block,
@@ -125,7 +116,6 @@ fn main() -> anyhow::Result<()> {
             single_tx,
             only_forward,
             backup_endpoint,
-            profile,
         } => live_run::live_run(
             start_block,
             end_block,
@@ -138,7 +128,6 @@ fn main() -> anyhow::Result<()> {
             single_tx,
             only_forward,
             backup_endpoint,
-            profile,
         ),
         Command::ExportRatios { db, path } => live_run::export_block_ratios(db, path),
         Command::ShowStatus { db } => live_run::show_status(db),

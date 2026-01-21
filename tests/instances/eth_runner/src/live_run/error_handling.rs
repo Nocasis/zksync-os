@@ -1,4 +1,4 @@
-use super::block_execution::{run_block_with_prefetch, GpuSharedState};
+use super::block_execution::{run_block, GpuSharedState};
 use super::db::{BlockStatus, BlockTraces, Database};
 use super::prefetch::fetch_block_traces;
 use super::rpc;
@@ -28,7 +28,6 @@ pub fn try_backup_endpoint(
     single_tx: Option<u64>,
     gpu_state: &mut Option<&mut GpuSharedState>,
     only_forward: bool,
-    profile: Option<String>,
     total_block_time: &mut std::time::Duration,
 ) -> Result<BlockStatus> {
     if let std::result::Result::Ok(BlockStatus::Success) = primary_result {
@@ -63,7 +62,7 @@ pub fn try_backup_endpoint(
     match backup_traces_result {
         std::result::Result::Ok(backup_traces) => {
             let backup_block_start = Instant::now();
-            let backup_result = run_block_with_prefetch(
+            let backup_result = run_block(
                 block_number,
                 db,
                 backup_endpoint,
@@ -73,7 +72,6 @@ pub fn try_backup_endpoint(
                 single_tx,
                 gpu_state,
                 only_forward,
-                profile,
                 backup_traces,
             );
             let backup_block_time = backup_block_start.elapsed();

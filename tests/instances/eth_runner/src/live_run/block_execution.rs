@@ -28,7 +28,7 @@ pub type GpuSharedState = ();
 
 /// Runs a block using prefetched traces.
 #[allow(clippy::too_many_arguments, unused_variables)]
-pub fn run_block_with_prefetch(
+pub fn run_block(
     block_number: u64,
     db: &Database,
     endpoint: &str,
@@ -38,7 +38,6 @@ pub fn run_block_with_prefetch(
     single_tx: Option<u64>,
     gpu_shared_state: &mut Option<&mut GpuSharedState>,
     only_forward: bool,
-    profile: Option<String>,
     block_traces: BlockTraces,
 ) -> Result<BlockStatus> {
     let block_start = Instant::now();
@@ -129,31 +128,12 @@ pub fn run_block_with_prefetch(
         std::path::Path::new(&dir).join(suffix)
     });
     
-    // Set up profiling if requested - include block number in filename
-    let profiler_config = profile.map(|profile_path| {
-        use std::path::PathBuf;
-        let path = if profile_path.ends_with(".svg") {
-            // If path ends with .svg, insert block number before extension
-            let mut path = PathBuf::from(&profile_path);
-            let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("flamegraph");
-            let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-            parent.join(format!("{}_block_{}.svg", file_stem, block_number))
-        } else {
-            // If no extension, append block number
-            PathBuf::from(format!("{}_{}", profile_path, block_number))
-        };
-        let mut profiler = rig::ProfilerConfig::new(path);
-        // Sample every 10th cycle for performance
-        profiler.frequency_recip = 10;
-        profiler
-    });
-    
     let run_config = rig::chain::RunConfig {
         witness_output_file: output_path,
         only_forward,
         app: Some("evm_replay".to_string()),
         check_storage_diff_hashes: true,
-        profiler_config,
+        profiler_config: None,
         ..Default::default()
     };
     

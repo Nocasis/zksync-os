@@ -25,7 +25,6 @@ fn run<const RANDOMIZED: bool>(
     calltrace: CallTrace,
     block_hashes: Option<BlockHashes>,
     witness_output_dir: Option<String>,
-    profile: Option<String>,
 ) -> anyhow::Result<()> {
     chain.set_last_block_number(block_number - 1);
 
@@ -41,21 +40,12 @@ fn run<const RANDOMIZED: bool>(
         std::path::Path::new(&dir).join(suffix)
     });
     
-    // Set up profiling if requested
-    let profiler_config = profile.map(|path| {
-        use std::path::PathBuf;
-        let mut profiler = rig::ProfilerConfig::new(PathBuf::from(path));
-        // Sample every 10th cycle for performance (1 = every cycle, 10 = every 10th cycle)
-        profiler.frequency_recip = 10;
-        profiler
-    });
-    
     let run_config = rig::chain::RunConfig {
         witness_output_file: output_path,
         only_forward: false,
         app: Some("evm_replay".to_string()),
         check_storage_diff_hashes: true,
-        profiler_config,
+        profiler_config: None,
         ..Default::default()
     };
     let (output, stats, _) = chain
@@ -82,7 +72,6 @@ pub fn single_run(
     witness_output_dir: Option<String>,
     chain_id: Option<u64>,
     single_tx: Option<u64>,
-    profile: Option<String>,
 ) -> anyhow::Result<()> {
     use std::path::Path;
     let dir = Path::new(&block_dir);
@@ -162,7 +151,6 @@ pub fn single_run(
             calltrace,
             block_hashes,
             witness_output_dir,
-            profile,
         )
     } else {
         let chain = Chain::empty(Some(1));
@@ -178,7 +166,6 @@ pub fn single_run(
             calltrace,
             block_hashes,
             witness_output_dir,
-            profile,
         )
     }
 }

@@ -26,7 +26,6 @@ pub fn live_run(
     single_tx: Option<u64>,
     only_forward: bool,
     backup_endpoint: Option<String>,
-    profile: Option<String>,
 ) -> Result<()> {
     let run_start = Instant::now();
     
@@ -87,8 +86,11 @@ pub fn live_run(
         )?;
         
         // Check if we should skip this block
+        // Remove from prefetch cache first to prevent cache from stalling
         if let std::result::Result::Ok(Some(status)) = db.get_block_status(n) {
             if skip_successful && matches!(status, BlockStatus::Success) {
+                // Remove from cache before skipping to prevent prefetch stall
+                prefetch_cache.remove(&n);
                 debug!("Skipping block {n}, already succeeded");
                 stats.blocks_skipped_already_succeeded += 1;
                 continue;
@@ -117,7 +119,7 @@ pub fn live_run(
         
         // Process block sequentially
         let block_start = Instant::now();
-        let primary_result = block_execution::run_block_with_prefetch(
+        let primary_result = block_execution::run_block(
             n,
             &db,
             &endpoint,
@@ -127,7 +129,6 @@ pub fn live_run(
             single_tx,
             gpu_state,
             only_forward,
-            profile.clone(),
             block_traces,
         );
         let block_time = block_start.elapsed();
@@ -146,7 +147,6 @@ pub fn live_run(
                 single_tx,
                 gpu_state,
                 only_forward,
-                profile.clone(),
                 &mut stats.total_block_time,
             )
         } else {
